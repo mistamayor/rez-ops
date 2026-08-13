@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rez Ops — Architecture Walkthrough</title>
+<style>
+  :root{
+    --bg:#f3f1ea;
+    --bg-panel:#ffffff;
+    --bg-panel-2:#eeece3;
+    --fg:#1a1c1f;
+    --fg-dim:#5c5f66;
+    --fg-faint:#8a8d94;
+    --border:#d9d5c9;
+    --border-strong:#b9b5a6;
+    --sensor:#a5660c;
+    --sensor-soft:#f4e3c8;
+    --ledger:#0d7d68;
+    --ledger-soft:#d9efe9;
+    --voice:#3b53c4;
+    --voice-soft:#e1e5fa;
+    --ops:#6a4bb0;
+    --ops-soft:#e9e1f7;
+    --danger:#b13a2a;
+    --danger-soft:#f6ddd7;
+    --ok:#1f7a52;
+    --shadow: 0 1px 2px rgba(20,18,10,0.06), 0 8px 24px rgba(20,18,10,0.06);
+    --radius: 14px;
+    --mono: ui-monospace, "SF Mono", "Menlo", "Consolas", "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0a0b0d;
+      --bg-panel:#15171b;
+      --bg-panel-2:#1c1e23;
+      --fg:#e9e7df;
+      --fg-dim:#a3a6ac;
+      --fg-faint:#6d7077;
+      --border:#2b2d33;
+      --border-strong:#3c3f47;
+      --sensor:#e3a04a;
+      --sensor-soft:#3a2c14;
+      --ledger:#3fd1ac;
+      --ledger-soft:#0f2c26;
+      --voice:#8ea0ff;
+      --voice-soft:#1b2247;
+      --ops:#b79bff;
+      --ops-soft:#241c3d;
+      --danger:#ff7a63;
+      --danger-soft:#3a1c17;
+      --ok:#4fd18e;
+      --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 12px 32px rgba(0,0,0,0.45);
+    }
+  }
+
+  *,*::before,*::after{ box-sizing:border-box; }
+  html,body{ height:100%; }
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--fg);
+    font-family:var(--sans);
+    overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  body::before{
+    content:"";
+    position:fixed; inset:0;
+    background-image:
+      radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 1px);
+    background-size: 28px 28px;
+    opacity:0.5;
+    pointer-events:none;
+    z-index:0;
+  }
+
+  .deck-shell{
+    position:relative;
+    z-index:1;
+    height:100vh;
+    display:flex;
+    flex-direction:column;
+  }
+
+  header.masthead{
+    flex:0 0 auto;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding: 10px clamp(16px,3vw,40px);
+    border-bottom:1px solid var(--border);
+    font-family:var(--mono);
+    font-size:12px;
+    letter-spacing:0.04em;
+    color:var(--fg-faint);
+  }
+  header.masthead .brand{
+    display:flex; align-items:center; gap:8px;
+    color:var(--fg-dim);
+  }
+  header.masthead .brand .dot{
+    width:8px; height:8px; border-radius:50%;
+    background:var(--sensor);
+    box-shadow:0 0 0 3px var(--sensor-soft);
+  }
+
+  main#deck{
+    flex:1 1 auto;
+    position:relative;
+    min-height:0;
+  }
+
+  .slide{
+    position:absolute;
+    inset:0;
+    display:none;
+    flex-direction:column;
+    padding: clamp(20px,3.2vw,48px) clamp(20px,6vw,88px);
+    overflow-y:auto;
+    animation: fadeIn 0.28s ease;
+  }
+  .slide.active{ display:flex; }
+  @keyframes fadeIn{ from{ opacity:0; transform:translateY(6px);} to{opacity:1; transform:translateY(0);} }
+  @media (prefers-reduced-motion: reduce){
+    .slide{ animation:none; }
+  }
+
+  .slide-inner{
+    margin:auto 0;
+    width:100%;
+    max-width:1180px;
+    margin-left:auto;
+    margin-right:auto;
+  }
+
+  .kicker{
+    display:inline-flex;
+    align-items:center;
+    gap:8px;
+    font-family:var(--mono);
+    font-size:12px;
+    letter-spacing:0.12em;
+    text-transform:uppercase;
+    color:var(--fg-dim);
+    margin-bottom:10px;
+  }
+  .kicker .icon{ width:15px; height:15px; }
+
+  h1.slide-title{
+    font-size:clamp(26px,4vw,42px);
+    line-height:1.12;
+    margin:0 0 14px 0;
+    letter-spacing:-0.01em;
+  }
+  h2.slide-sub{
+    font-size:clamp(14px,1.6vw,18px);
+    font-weight:500;
+    color:var(--fg-dim);
+    margin:0 0 26px 0;
+    max-width:70ch;
+  }
+
+  .icon{ width:1em; height:1em; display:inline-block; vertical-align:-0.15em; }
+
+  .tag{
+    display:inline-flex; align-items:center; gap:6px;
+    font-family:var(--mono); font-size:11px; letter-spacing:0.06em; text-transform:uppercase;
+    padding:4px 10px; border-radius:999px; border:1px solid transparent; font-weight:600;
+  }
+  .tag .icon{ width:13px; height:13px; }
+  .tag-sensor{ background:var(--sensor-soft); color:var(--sensor); border-color:var(--sensor); }
+  .tag-ledger{ background:var(--ledger-soft); color:var(--ledger); border-color:var(--ledger); }
+  .tag-voice{ background:var(--voice-soft); color:var(--voice); border-color:var(--voice); }
+  .tag-ops{ background:var(--ops-soft); color:var(--ops); border-color:var(--ops); }
+  .tag-danger{ background:var(--danger-soft); color:var(--danger); border-color:var(--danger); }
+
+  /* ---------- Title slide ---------- */
+  .title-slide{ align-items:center; text-align:center; justify-content:center; }
+  .detector{
+    position:relative;
+    width:150px; height:150px;
+    margin:0 auto 26px auto;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .detector .ring{
+    position:absolute; border-radius:50%;
+    border:1.5px solid var(--sensor);
+    opacity:0;
+    animation: pulse 2.8s ease-out infinite;
+  }
+  .detector .ring:nth-child(1){ width:60px; height:60px; animation-delay:0s; }
+  .detector .ring:nth-child(2){ width:60px; height:60px; animation-delay:0.9s; }
+  .detector .ring:nth-child(3){ width:60px; height:60px; animation-delay:1.8s; }
+  @keyframes pulse{
+    0%{ width:60px; height:60px; opacity:0.85; }
+    100%{ width:150px; height:150px; opacity:0; }
+  }
+  @media (prefers-reduced-motion: reduce){
+    .detector .ring{ animation:none; opacity:0.35; }
+  }
+  .detector .core{
+    position:relative; z-index:2;
+    width:60px; height:60px; border-radius:50%;
+    background:var(--sensor);
+    display:flex; align-items:center; justify-content:center;
+    box-shadow:0 0 0 6px var(--sensor-soft);
+  }
+  .detector .core svg{ width:28px; height:28px; color:var(--bg-panel); }
+
+  .wordmark{
+    font-size:clamp(40px,8vw,88px);
+    font-weight:800;
+    letter-spacing:-0.02em;
+    margin:0;
+    line-height:1;
+  }
+  .wordmark span{ color:var(--sensor); }
+  .tagline{
+    font-family:var(--mono);
+    font-size:clamp(14px,2vw,20px);
+    color:var(--fg-dim);
+    margin:14px 0 22px 0;
+    letter-spacing:0.01em;
+  }
+  .one-liner{
+    max-width:60ch;
+    margin:0 auto;
+    font-size:clamp(15px,1.8vw,19px);
+    color:var(--fg);
+    line-height:1.5;
+  }
+  .title-meta{
+    margin-top:34px;
+    font-family:var(--mono);
+    font-size:12px;
+    color:var(--fg-faint);
+    letter-spacing:0.04em;
+  }
+
+  /* ---------- generic content blocks ---------- */
+  .grid-2{ display:grid; grid-template-columns:1fr 1fr; gap:28px; align-items:start; }
+  .grid-3{ display:grid; grid-template-columns:repeat(3,1fr); gap:18px; }
+  @media (max-width:820px){
+    .grid-2{ grid-template-columns:1fr; }
+    .grid-3{ grid-template-columns:1fr; }
+  }
+
+  .panel{
+    background:var(--bg-panel);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:18px 20px;
+    box-shadow:var(--shadow);
+  }
+
+  ul.bullets{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:12px; }
+  ul.bullets li{
+    position:relative; padding-left:22px; line-height:1.5; font-size:15px; color:var(--fg);
+  }
+  ul.bullets li::before{
+    content:""; position:absolute; left:0; top:0.5em;
+    width:8px; height:8px; border-radius:50%;
+    background:var(--sensor);
+    box-shadow:0 0 0 3px var(--sensor-soft);
+    transform:translateY(-50%);
+  }
+  ul.bullets.ledger li::before{ background:var(--ledger); box-shadow:0 0 0 3px var(--ledger-soft); }
+  ul.bullets.voice li::before{ background:var(--voice); box-shadow:0 0 0 3px var(--voice-soft); }
+  ul.bullets.danger li::before{ background:var(--danger); box-shadow:0 0 0 3px var(--danger-soft); }
+  ul.bullets li strong{ color:var(--fg); }
+  ul.bullets li em.dim{ font-style:normal; color:var(--fg-dim); }
+
+  .callout{
+    margin-top:18px;
+    border-left:3px solid var(--danger);
+    background:var(--danger-soft);
+    color:var(--fg);
+    padding:12px 16px;
+    border-radius:0 10px 10px 0;
+    font-size:14.5px;
+    line-height:1.5;
+  }
+  .callout strong{ color:var(--danger); }
+
+  /* decision cards */
+  .decision-card{
+    background:var(--bg-panel);
+    border:1px solid var(--border);
+    border-left:4px solid var(--border-strong);
+    border-radius:10px;
+    padding:14px 18px;
+    box-shadow:var(--shadow);
+  }
+  .decision-card.c-sensor{ border-left-color:var(--sensor); }
+  .decision-card.c-ledger{ border-left-color:var(--ledger); }
+  .decision-card.c-voice{ border-left-color:var(--voice); }
+  .decision-card.c-ops{ border-left-color:var(--ops); }
+  .decision-card .ad-id{
+    font-family:var(--mono); font-size:11.5px; font-weight:700; letter-spacing:0.05em;
+    color:var(--fg-faint); text-transform:uppercase; display:block; margin-bottom:4px;
+  }
+  .decision-card .decision-text{ font-size:15px; font-weight:600; margin:0 0 6px 0; line-height:1.4; }
+  .decision-card .prevents{ font-size:13.5px; color:var(--fg-dim); line-height:1.45; margin:0; }
+  .decision-card .prevents b{ color:var(--danger); font-weight:600; }
+  .decision-stack{ display:flex; flex-direction:column; gap:12px; }
+
+  /* svg diagram wrapper */
+  .diagram-wrap{
+    background:var(--bg-panel);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:10px;
+    box-shadow:var(--shadow);
+  }
+  .diagram-wrap svg{ width:100%; height:auto; display:block; }
+  .svg-label{ font-family:var(--sans); font-weight:700; fill:var(--fg); }
+  .svg-sub{ font-family:var(--mono); fill:var(--fg-dim); }
+  .svg-note{ font-family:var(--mono); fill:var(--danger); font-weight:600; }
+
+  /* stack table */
+  table.stack-table{ width:100%; border-collapse:collapse; }
+  table.stack-table th, table.stack-table td{
+    text-align:left; padding:12px 14px; border-bottom:1px solid var(--border); vertical-align:top;
+  }
+  table.stack-table th{
+    font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:0.06em; color:var(--fg-faint);
+  }
+  table.stack-table td.name{ font-weight:700; white-space:nowrap; }
+  table.stack-table td.note{ color:var(--fg-dim); font-size:14px; }
+  table.stack-table code{
+    font-family:var(--mono); background:var(--bg-panel-2); padding:1px 6px; border-radius:5px; font-size:13px;
+  }
+
+  /* source tree */
+  pre.tree{
+    font-family:var(--mono);
+    font-size:12.6px;
+    line-height:1.55;
+    background:var(--bg-panel);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    padding:16px 18px;
+    box-shadow:var(--shadow);
+    overflow-x:auto;
+    margin:0;
+    color:var(--fg);
+  }
+  pre.tree .c1{ color:var(--sensor); }
+  pre.tree .c2{ color:var(--ledger); }
+  pre.tree .c3{ color:var(--voice); }
+  pre.tree .cm{ color:var(--fg-faint); font-style:italic; }
+
+  /* deferred list */
+  .deferred-item{
+    display:flex; gap:14px; padding:14px 0; border-bottom:1px solid var(--border);
+  }
+  .deferred-item:last-child{ border-bottom:none; }
+  .deferred-item .icon{ width:20px; height:20px; flex:0 0 auto; margin-top:2px; color:var(--ops); }
+  .deferred-item .why{ color:var(--fg-dim); font-size:13.5px; margin-top:3px; }
+  .deferred-item .what{ font-weight:600; font-size:15px; }
+
+  /* closing */
+  .np-row{ display:flex; align-items:flex-start; gap:14px; padding:12px 0; border-bottom:1px solid var(--border); }
+  .np-row:last-child{ border-bottom:none; }
+  .np-row .icon{ width:20px; height:20px; margin-top:2px; flex:0 0 auto; }
+  .np-row .label{ font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:0.05em; color:var(--fg-faint); display:block; margin-bottom:2px; }
+  .np-row .txt{ font-size:14.5px; line-height:1.5; }
+  .next-steps{ list-style:none; margin:0; padding:0; counter-reset:step; display:flex; flex-direction:column; gap:10px; }
+  .next-steps li{ counter-increment:step; position:relative; padding-left:32px; font-size:14.5px; line-height:1.5; }
+  .next-steps li::before{
+    content:counter(step);
+    position:absolute; left:0; top:0;
+    width:22px; height:22px; border-radius:6px;
+    background:var(--ops-soft); color:var(--ops);
+    font-family:var(--mono); font-weight:700; font-size:12px;
+    display:flex; align-items:center; justify-content:center;
+  }
+
+  /* ---------- nav ---------- */
+  nav.deck-nav{
+    flex:0 0 auto;
+    display:flex; align-items:center; justify-content:center; gap:18px;
+    padding:12px 16px;
+    border-top:1px solid var(--border);
+    background:var(--bg);
+  }
+  .nav-btn{
+    width:38px; height:38px; border-radius:50%;
+    border:1px solid var(--border-strong);
+    background:var(--bg-panel);
+    color:var(--fg);
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer;
+    font-size:16px;
+    transition:background 0.15s ease, transform 0.1s ease;
+  }
+  .nav-btn:hover{ background:var(--bg-panel-2); }
+  .nav-btn:active{ transform:scale(0.94); }
+  .nav-btn:disabled{ opacity:0.3; cursor:default; }
+  .nav-btn svg{ width:16px; height:16px; }
+
+  .counter{
+    font-family:var(--mono); font-size:13px; color:var(--fg-dim); min-width:60px; text-align:center;
+    letter-spacing:0.03em;
+  }
+
+  .dots{ display:flex; gap:6px; align-items:center; }
+  .dot-btn{
+    width:8px; height:8px; border-radius:50%; border:none; padding:0;
+    background:var(--border-strong); cursor:pointer;
+    transition:background 0.15s ease, transform 0.15s ease;
+  }
+  .dot-btn.active{ background:var(--sensor); transform:scale(1.35); }
+
+  .hint{
+    position:fixed; bottom:70px; left:50%; transform:translateX(-50%);
+    font-family:var(--mono); font-size:11px; color:var(--fg-faint);
+    background:var(--bg-panel); border:1px solid var(--border); border-radius:999px;
+    padding:5px 12px; opacity:0; pointer-events:none; transition:opacity 0.3s ease;
+    z-index:5;
+  }
+  .hint.show{ opacity:1; }
+
+  @media (max-width:600px){
+    .dots{ display:none; }
+  }
+</style>
+</head>
+<body>
+
+<svg style="position:absolute;width:0;height:0" aria-hidden="true">
+  <defs>
+    <symbol id="i-sensor" viewBox="0 0 24 24"><circle cx="12" cy="18" r="2.2" fill="currentColor"/><path d="M7 13a7 7 0 0 1 10 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M3.5 9.3a11 11 0 0 1 17 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity="0.55"/></symbol>
+    <symbol id="i-ledger" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><line x1="7.5" y1="8" x2="16.5" y2="8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><line x1="7.5" y1="12" x2="16.5" y2="12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><line x1="7.5" y1="16" x2="13" y2="16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="i-voice" viewBox="0 0 24 24"><path d="M4 5.5h16a1 1 0 0 1 1 1V15a1 1 0 0 1-1 1H10l-4.5 4V16H4a1 1 0 0 1-1-1V6.5a1 1 0 0 1 1-1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><line x1="7" y1="9.4" x2="17" y2="9.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.7"/><line x1="7" y1="12.4" x2="13.5" y2="12.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" opacity="0.7"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 3 21.5 20H2.5Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><line x1="12" y1="9.5" x2="12" y2="14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.8" r="1.05" fill="currentColor"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 20 6v6c0 5-3.5 8.2-8 9-4.5-.8-8-4-8-9V6Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3 21 8l-9 5-9-5Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M3 12l9 5 9-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" opacity="0.6"/><path d="M3 16l9 5 9-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" opacity="0.35"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 24 24"><path d="M4 15a8 8 0 1 1 16 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><line x1="12" y1="15" x2="16" y2="9.3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="15" r="1.1" fill="currentColor"/></symbol>
+    <symbol id="i-box" viewBox="0 0 24 24"><path d="M12 3 20 7v10l-8 4-8-4V7Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M4 7l8 4 8-4M12 11v10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" opacity="0.6"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6.5a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24"><line x1="5" y1="3" x2="5" y2="21" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M5 4.5h13l-3 3.5 3 3.5H5Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="i-arrow-l" viewBox="0 0 24 24"><path d="M14.5 5 8 12l6.5 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-arrow-r" viewBox="0 0 24 24"><path d="M9.5 5 16 12l-6.5 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="6.5" y1="17.5" x2="17.5" y2="6.5" stroke="currentColor" stroke-width="1.8"/></symbol>
+
+    <marker id="arr-sensor" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" class="fill-sensor"/></marker>
+    <marker id="arr-ledger" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" class="fill-ledger"/></marker>
+    <marker id="arr-voice" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" class="fill-voice"/></marker>
+    <marker id="arr-neutral" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10Z" class="fill-neutral"/></marker>
+  </defs>
+</svg>
+
+<style>
+  .fill-sensor{ fill:var(--sensor); }
+  .fill-ledger{ fill:var(--ledger); }
+  .fill-voice{ fill:var(--voice); }
+  .fill-neutral{ fill:var(--fg-faint); }
+  .stroke-sensor{ stroke:var(--sensor); }
+  .stroke-ledger{ stroke:var(--ledger); }
+  .stroke-voice{ stroke:var(--voice); }
+  .stroke-neutral{ stroke:var(--fg-faint); }
+  .stroke-danger{ stroke:var(--danger); }
+</style>
+
+<div class="deck-shell">
+  <header class="masthead">
+    <div class="brand"><span class="dot"></span> REZ OPS — Architecture Walkthrough</div>
+    <div>Sensors — Ledger — Voice</div>
+  </header>
+
+  <main id="deck">
+
+    <!-- 1: TITLE -->
+    <section class="slide active" data-title="Title">
+      <div class="slide-inner title-slide">
+        <div class="detector">
+          <div class="ring"></div><div class="ring"></div><div class="ring"></div>
+          <div class="core"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="18" r="2.2" fill="currentColor"/><path d="M7 13a7 7 0 0 1 10 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M3.5 9.3a11 11 0 0 1 17 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity="0.6"/></svg></div>
+        </div>
+        <h1 class="wordmark">REZ<span>·</span>OPS</h1>
+        <p class="tagline">Smoke detector, not fire inspector.</p>
+        <p class="one-liner">An AI agent framework that keeps a Disaster Recovery program's true state — freshness, ownership, risk — continuously visible, without becoming yet another system of record.</p>
+        <div class="title-meta">ARCHITECTURE SPINE WALKTHROUGH · v1 · 2026-08-12</div>
+      </div>
+    </section>
+
+    <!-- 2: PROBLEM -->
+    <section class="slide" data-title="The Problem">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-warn"/></svg> The Problem</span>
+        <h1 class="slide-title">Reactive by design, not by accident</h1>
+        <h2 class="slide-sub">DR programs only get inspected when it's expensive to do so.</h2>
+        <div class="grid-2">
+          <ul class="bullets">
+            <li><strong>Fragmented data.</strong> BIAs in SharePoint, tiering in a CMDB, runbooks in wikis, RACI in a spreadsheet nobody re-syncs.</li>
+            <li><strong>No system knows its own freshness.</strong> A BIA doesn't know it's 18 months overdue. A RACI's "Accountable" owner left the company two reorgs ago.</li>
+            <li><strong>Ownership rots silently.</strong> Nothing infers who's actually responsible today from what's actually happening — only from a document that stopped being updated.</li>
+            <li><strong>Assembly is manual and slow</strong> — so true state only gets compiled under pressure: right before an audit, or right after an incident already proved a gap was real.</li>
+          </ul>
+          <div class="panel">
+            <div class="kicker" style="margin-bottom:14px;"><svg class="icon"><use href="#i-clock"/></svg> Where today's cycle breaks</div>
+            <div style="font-family:var(--mono); font-size:13px; line-height:2.1; color:var(--fg-dim);">
+              incident&nbsp;or&nbsp;audit&nbsp;looms<br>
+              &nbsp;&nbsp;→ scramble to reconstruct state<br>
+              &nbsp;&nbsp;→ gaps found <span style="color:var(--danger); font-weight:700;">too late</span><br>
+              &nbsp;&nbsp;→ fixed under duress<br>
+              &nbsp;&nbsp;→ drifts stale again<br>
+              &nbsp;&nbsp;→ <span style="color:var(--fg-faint);">(repeat)</span>
+            </div>
+            <div class="callout" style="margin-top:16px;">At global, always-on scale, that lag is where real risk hides: <strong>a stale Tier-1 BIA or an unmapped dependency turns an outage into a disaster.</strong></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3: PARADIGM -->
+    <section class="slide" data-title="Paradigm">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-layers"/></svg> The Paradigm</span>
+        <h1 class="slide-title">Sensors — Ledger — Voice</h1>
+        <h2 class="slide-sub">Three layers, each its own MCP-server boundary. One dependency-direction rule holds it together.</h2>
+
+        <div class="grid-2" style="align-items:stretch;">
+          <div class="diagram-wrap">
+            <svg viewBox="0 0 820 470" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sensors, Ledger, Voice layering diagram">
+              <!-- Voice -->
+              <rect x="300" y="18" width="220" height="72" rx="12" fill="var(--voice-soft)" stroke="var(--voice)" stroke-width="2"/>
+              <text x="410" y="48" text-anchor="middle" class="svg-label" font-size="16">VOICE</text>
+              <text x="410" y="68" text-anchor="middle" class="svg-sub" font-size="11.5">coding-agent runtime · orchestrates, presents</text>
+
+              <!-- arrows voice -> sensors/ledger -->
+              <path d="M340 90 C 300 130, 240 140, 190 172" fill="none" class="stroke-voice" stroke-width="2.2" marker-end="url(#arr-voice)"/>
+              <path d="M480 90 C 520 130, 590 140, 630 172" fill="none" class="stroke-voice" stroke-width="2.2" marker-end="url(#arr-voice)"/>
+
+              <!-- Sensors -->
+              <rect x="30" y="176" width="330" height="92" rx="12" fill="var(--sensor-soft)" stroke="var(--sensor)" stroke-width="2"/>
+              <text x="195" y="208" text-anchor="middle" class="svg-label" font-size="16">SENSORS</text>
+              <text x="195" y="228" text-anchor="middle" class="svg-sub" font-size="11.5">connectors/ — dumb, read-only, per-domain</text>
+              <text x="195" y="246" text-anchor="middle" class="svg-sub" font-size="11.5">fetch + normalize only, no freshness logic</text>
+
+              <!-- Ledger -->
+              <rect x="460" y="176" width="330" height="92" rx="12" fill="var(--ledger-soft)" stroke="var(--ledger)" stroke-width="2"/>
+              <text x="625" y="208" text-anchor="middle" class="svg-label" font-size="16">LEDGER</text>
+              <text x="625" y="228" text-anchor="middle" class="svg-sub" font-size="11.5">ledger_core/ — sole owner of the Freshness Ledger</text>
+              <text x="625" y="246" text-anchor="middle" class="svg-sub" font-size="11.5">confidence, ownership arbitration, drafts</text>
+
+              <!-- forbidden direct link -->
+              <line x1="362" y1="222" x2="458" y2="222" stroke="var(--danger)" stroke-width="2" stroke-dasharray="5 5"/>
+              <circle cx="410" cy="222" r="13" fill="var(--bg-panel)" stroke="var(--danger)" stroke-width="1.8"/>
+              <line x1="403" y1="215" x2="417" y2="229" stroke="var(--danger)" stroke-width="1.8"/>
+              <line x1="417" y1="215" x2="403" y2="229" stroke="var(--danger)" stroke-width="1.8"/>
+              <text x="410" y="205" text-anchor="middle" class="svg-note" font-size="10.5">never call directly</text>
+
+              <!-- arrows down to schema -->
+              <path d="M195 268 L 300 336" fill="none" class="stroke-sensor" stroke-width="2.2" marker-end="url(#arr-sensor)"/>
+              <path d="M625 268 L 520 336" fill="none" class="stroke-ledger" stroke-width="2.2" marker-end="url(#arr-ledger)"/>
+
+              <!-- Schema -->
+              <rect x="170" y="340" width="480" height="62" rx="10" fill="var(--bg-panel-2)" stroke="var(--border-strong)" stroke-width="1.6"/>
+              <text x="410" y="366" text-anchor="middle" class="svg-label" font-size="14">Shared Schema module</text>
+              <text x="410" y="384" text-anchor="middle" class="svg-sub" font-size="11">RawFact (connector-writable) · LedgerRecord (ledger-core-only)</text>
+
+              <!-- ledger -> ledger data -->
+              <path d="M760 268 L 745 336" fill="none" class="stroke-ledger" stroke-width="2.2" marker-end="url(#arr-ledger)"/>
+              <ellipse cx="735" cy="345" rx="55" ry="9" fill="var(--bg-panel-2)" stroke="var(--border-strong)" stroke-width="1.4"/>
+              <path d="M680 345 v34 a55 9 0 0 0 110 0 v-34" fill="var(--bg-panel-2)" stroke="var(--border-strong)" stroke-width="1.4"/>
+              <ellipse cx="735" cy="379" rx="55" ry="9" fill="none" stroke="var(--border-strong)" stroke-width="1.4"/>
+              <text x="735" y="366" text-anchor="middle" class="svg-sub" font-size="10">ledger_data/</text>
+              <text x="735" y="378" text-anchor="middle" class="svg-sub" font-size="10">git-committed</text>
+
+              <text x="410" y="440" text-anchor="middle" class="svg-sub" font-size="12" font-weight="700" fill="var(--fg-dim)">Runtime mediates all data flow. Connectors and Ledger-Core depend only on the shared schema — never on each other.</text>
+            </svg>
+          </div>
+
+          <div class="decision-stack">
+            <div class="decision-card c-sensor">
+              <span class="ad-id"><svg class="icon"><use href="#i-sensor"/></svg> Sensors</span>
+              <p class="decision-text">One dumb, read-only, domain-scoped MCP server per data source (calendar, ticketing, git, CMDB).</p>
+              <p class="prevents">Fetches and normalizes only — carries zero freshness, confidence, or ownership logic.</p>
+            </div>
+            <div class="decision-card c-ledger">
+              <span class="ad-id"><svg class="icon"><use href="#i-ledger"/></svg> Ledger</span>
+              <p class="decision-text">One MCP server, sole owner of the Freshness Ledger.</p>
+              <p class="prevents">Computation, confidence/coverage scoring, ownership arbitration, orphan-risk detection, drafted outbound content — all in one place.</p>
+            </div>
+            <div class="decision-card c-voice">
+              <span class="ad-id"><svg class="icon"><use href="#i-voice"/></svg> Voice</span>
+              <p class="decision-text">The orchestrating runtime (Claude Code, or any MCP client). Calls Sensors and Ledger, presents output.</p>
+              <p class="prevents">Holds <b>no</b> domain logic of its own — that's exactly what keeps Rez Ops portable across runtimes.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4: BOUNDARY / TOPOLOGY -->
+    <section class="slide" data-title="Boundary & Topology">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-shield"/></svg> Decisions — Boundary &amp; Topology</span>
+        <h1 class="slide-title">Where the walls are</h1>
+        <h2 class="slide-sub">AD-1 · AD-2 · AD-6 — keeping domain logic, server scope, and outbound writes each in exactly one place.</h2>
+        <div class="grid-3">
+          <div class="decision-card c-voice">
+            <span class="ad-id">AD-1 · Layering discipline</span>
+            <p class="decision-text">Domain logic (freshness rules, confidence, ownership inference) may only live inside a connector or ledger-core tool — never in a runtime prompt, skill, or system instruction.</p>
+            <p class="prevents"><b>Prevents:</b> freshness/confidence/ownership logic leaking into runtime-specific prompts, which breaks consistency and cross-runtime portability. Enforced by code review, not tooling.</p>
+          </div>
+          <div class="decision-card c-sensor">
+            <span class="ad-id">AD-2 · One server per domain</span>
+            <p class="decision-text">Every data domain ships as its own minimal MCP server. A new domain means a new connector — never extending an existing one's scope. Tool names are domain-prefixed (<code>calendar_list_items</code>).</p>
+            <p class="prevents"><b>Prevents:</b> a monolith server bloating every session's tool/context budget, and two independently-built connectors colliding on tool names in the runtime's shared namespace.</p>
+          </div>
+          <div class="decision-card c-ledger">
+            <span class="ad-id">AD-6 · Draft-not-send</span>
+            <p class="decision-text">Any agent-authored outbound content is written only to a git-tracked <code>drafts/</code> queue, and only by calling ledger-core's write tool — never a direct filesystem write from any other component.</p>
+            <p class="prevents"><b>Prevents:</b> an accidental or later-added write-back path bypassing human approval, and two writers racing on one drafts directory.</p>
+          </div>
+        </div>
+        <div class="callout" style="margin-top:22px;">Net effect: no component can quietly grow a responsibility it wasn't designed to hold.</div>
+      </div>
+    </section>
+
+    <!-- 5: SCHEMA / OWNERSHIP / STATE -->
+    <section class="slide" data-title="Schema, State & Ownership">
+      <div class="slide-inner">
+        <span class="kicker tag-ledger" style="background:none;border:none;padding:0;"><svg class="icon"><use href="#i-ledger"/></svg> Decisions — Schema, State &amp; Ownership</span>
+        <h1 class="slide-title">One truth, one owner, no guessing</h1>
+        <h2 class="slide-sub">AD-3 · AD-4 · AD-5 · AD-9 · AD-10 — the rules that make the Ledger trustworthy.</h2>
+        <div class="grid-2">
+          <div class="decision-stack">
+            <div class="decision-card c-ledger">
+              <span class="ad-id">AD-3 · Append-only, projected</span>
+              <p class="decision-text">Every state change is an immutable, timestamped, git-committed event. Current state is always a recomputed projection — never hand-edited.</p>
+              <p class="prevents"><b>Prevents:</b> silent, unaudited edits to freshness/ownership state that would destroy the history the trust layer depends on.</p>
+            </div>
+            <div class="decision-card c-ledger">
+              <span class="ad-id">AD-4 · One shared schema module</span>
+              <p class="decision-text">A single versioned schema defines every record shape. Every connector and ledger-core import it — none declares ad hoc fields.</p>
+              <p class="prevents"><b>Prevents:</b> each connector inventing its own shape for observed data, producing facts ledger-core can't merge.</p>
+            </div>
+            <div class="decision-card c-ledger">
+              <span class="ad-id">AD-5 · Ledger-core owns confidence</span>
+              <p class="decision-text">Confidence/coverage is computed exclusively by ledger-core, from raw connector facts, using one documented method. Connectors never report a confidence score.</p>
+              <p class="prevents"><b>Prevents:</b> connectors independently guessing confidence with inconsistent methodology — undermining "never hide uncertainty."</p>
+            </div>
+          </div>
+          <div class="decision-stack">
+            <div class="decision-card c-ledger">
+              <span class="ad-id">AD-9 · RawFact vs. LedgerRecord</span>
+              <p class="decision-text"><strong>RawFact</strong> (connector-writable): raw data + a <code>source</code> reference, never a confidence value. <strong>LedgerRecord</strong> (ledger-core-only): <code>confidence</code>, <code>tier_sla</code>, <code>escalation_owner</code>, <code>last_verified</code> — all computed.</p>
+              <p class="prevents"><b>Prevents:</b> connectors asserting owned fields like <code>tier_sla</code>, and loss of the provenance trail compliance/CISO adoption needs.</p>
+            </div>
+            <div class="decision-card c-ledger">
+              <span class="ad-id">AD-10 · Ownership arbitration</span>
+              <p class="decision-text">Exactly one authoritative connector per ownership-bearing field per entity. Conflicting facts are logged, never overwrite. Total silence escalates the field to <code>confidence: unknown</code> and adds the entity to the orphan-risk list.</p>
+              <p class="prevents"><b>Prevents:</b> silent last-write-wins conflicts, and the ownership wedge feature staying unimplemented prose instead of a real rule.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6: OPERATIONAL ENVELOPE -->
+    <section class="slide" data-title="Operational Envelope">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-gauge"/></svg> Decisions — Operational Envelope</span>
+        <h1 class="slide-title">Runs on a laptop, fails safe</h1>
+        <h2 class="slide-sub">AD-7 · AD-8 — the two rules that bind every layer, without exception.</h2>
+        <div class="grid-2">
+          <div class="decision-card c-ops">
+            <span class="ad-id">AD-7 · Local-first envelope</span>
+            <p class="decision-text">No hosted database, no container orchestration, no persistent server process. Durability comes from a git remote, pushed after each session.</p>
+            <ul class="bullets" style="margin-top:12px;">
+              <li>Scheduled work: OS scheduler (cron/launchd) invokes <code style="font-family:var(--mono);background:var(--bg-panel-2);padding:1px 6px;border-radius:5px;">claude -p --mcp-config .mcp.json --output-format json</code> — never <code style="font-family:var(--mono);">--bare</code>, which skips MCP autodiscovery and would run with zero Sensors or Ledger attached.</li>
+              <li>A failed scheduled run appends an error entry to <code style="font-family:var(--mono);">_ops.log.md</code> — never fails silently.</li>
+              <li>Credentials: OS keychain or <code style="font-family:var(--mono);">REZOPS_{DOMAIN}_TOKEN</code> — never <code style="font-family:var(--mono);">rezops.config.yaml</code> or any git-tracked file.</li>
+            </ul>
+          </div>
+          <div class="decision-card c-ops">
+            <span class="ad-id">AD-8 · Graceful degradation</span>
+            <p class="decision-text">Every runtime-facing operation fails open. An outage surfaces as an explicit <code>unknown</code>/unverified state — never a crash that blocks the human.</p>
+            <p class="prevents" style="margin-top:10px;"><b>Prevents:</b> Rez Ops ever blocking, replacing, or degrading the DR program below today's manual baseline if it's itself wrong, down, or a connector fails.</p>
+            <div class="callout" style="margin-top:14px;">No component or decision may require Rez Ops to be running for the underlying DR program to function. It is <strong>additive observation, never a dependency.</strong></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 7: STACK -->
+    <section class="slide" data-title="Stack">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-box"/></svg> What It's Built On</span>
+        <h1 class="slide-title">A stack with nothing to babysit</h1>
+        <h2 class="slide-sub">No database, no orchestrator, no daemon. Four moving parts.</h2>
+        <div class="panel">
+          <table class="stack-table">
+            <thead><tr><th>Component</th><th>Version / constraint</th><th>Why</th></tr></thead>
+            <tbody>
+              <tr>
+                <td class="name">Python</td>
+                <td><code>3.13+</code></td>
+                <td class="note">3.12 is already security-only maintenance — floor bumped to stay current.</td>
+              </tr>
+              <tr>
+                <td class="name">mcp (Python SDK)</td>
+                <td><code>1.29.x</code>, pinned <code>&lt;2</code></td>
+                <td class="note">v2.0.0 GA shipped 2026-07-28 with breaking changes — too new (~2 weeks old) to build v1 on.</td>
+              </tr>
+              <tr>
+                <td class="name">Claude Code</td>
+                <td>reference runtime</td>
+                <td class="note">Must support project-scoped <code>.mcp.json</code> and <code>-p --mcp-config --output-format json</code> headless mode. Any MCP-compatible client works — this is Voice, not a hard dependency.</td>
+              </tr>
+              <tr>
+                <td class="name">git</td>
+                <td>local repo + private remote</td>
+                <td class="note">Sole persistence layer. No database, anywhere.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8: SOURCE TREE / CONTAINER DIAGRAM -->
+    <section class="slide" data-title="Container & Source Tree">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-folder"/></svg> Structural Seed</span>
+        <h1 class="slide-title">The shape of the repo</h1>
+        <h2 class="slide-sub">Same layering, drawn as a running system and as a file tree.</h2>
+        <div class="grid-2" style="align-items:start;">
+          <div class="diagram-wrap">
+            <svg viewBox="0 0 820 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Container diagram">
+              <rect x="20" y="14" width="190" height="54" rx="10" fill="var(--bg-panel-2)" stroke="var(--border-strong)" stroke-width="1.6"/>
+              <text x="115" y="46" text-anchor="middle" class="svg-label" font-size="13">OS Scheduler</text>
+
+              <rect x="610" y="14" width="190" height="54" rx="10" fill="var(--bg-panel-2)" stroke="var(--border-strong)" stroke-width="1.6"/>
+              <text x="705" y="46" text-anchor="middle" class="svg-label" font-size="13">Program owner</text>
+
+              <path d="M140 68 L 340 106" fill="none" class="stroke-neutral" stroke-width="2" marker-end="url(#arr-neutral)"/>
+              <path d="M680 68 L 480 106" fill="none" class="stroke-neutral" stroke-width="2" marker-end="url(#arr-neutral)"/>
+
+              <rect x="250" y="108" width="320" height="60" rx="12" fill="var(--voice-soft)" stroke="var(--voice)" stroke-width="2"/>
+              <text x="410" y="134" text-anchor="middle" class="svg-label" font-size="14">VOICE — Runtime</text>
+              <text x="410" y="152" text-anchor="middle" class="svg-sub" font-size="10.5">Claude Code / any MCP client</text>
+
+              <path d="M340 168 L 240 214" fill="none" class="stroke-voice" stroke-width="2.2" marker-end="url(#arr-voice)"/>
+              <path d="M500 168 L 630 214" fill="none" class="stroke-voice" stroke-width="2.2" marker-end="url(#arr-voice)"/>
+
+              <rect x="40" y="216" width="410" height="172" rx="12" fill="none" stroke="var(--sensor)" stroke-width="2" stroke-dasharray="7 5"/>
+              <text x="60" y="238" class="svg-label" font-size="12" fill="var(--sensor)">SENSORS (connectors/)</text>
+
+              <g font-size="12">
+                <rect x="58" y="250" width="170" height="52" rx="8" fill="var(--sensor-soft)" stroke="var(--sensor)" stroke-width="1.4"/>
+                <text x="143" y="280" text-anchor="middle" class="svg-label" font-size="12.5">Calendar</text>
+                <rect x="242" y="250" width="170" height="52" rx="8" fill="var(--sensor-soft)" stroke="var(--sensor)" stroke-width="1.4"/>
+                <text x="327" y="280" text-anchor="middle" class="svg-label" font-size="12.5">Ticketing</text>
+                <rect x="58" y="318" width="170" height="52" rx="8" fill="var(--sensor-soft)" stroke="var(--sensor)" stroke-width="1.4"/>
+                <text x="143" y="348" text-anchor="middle" class="svg-label" font-size="12.5">Git repo</text>
+                <rect x="242" y="318" width="170" height="52" rx="8" fill="var(--sensor-soft)" stroke="var(--sensor)" stroke-width="1.4"/>
+                <text x="327" y="348" text-anchor="middle" class="svg-label" font-size="12.5">CMDB</text>
+              </g>
+
+              <line x1="452" y1="300" x2="488" y2="300" stroke="var(--danger)" stroke-width="2" stroke-dasharray="5 5"/>
+              <circle cx="470" cy="300" r="11" fill="var(--bg-panel)" stroke="var(--danger)" stroke-width="1.6"/>
+              <line x1="464" y1="294" x2="476" y2="306" stroke="var(--danger)" stroke-width="1.6"/>
+              <line x1="476" y1="294" x2="464" y2="306" stroke="var(--danger)" stroke-width="1.6"/>
+
+              <rect x="490" y="250" width="290" height="90" rx="12" fill="var(--ledger-soft)" stroke="var(--ledger)" stroke-width="2"/>
+              <text x="635" y="284" text-anchor="middle" class="svg-label" font-size="14">LEDGER — Ledger-Core</text>
+              <text x="635" y="304" text-anchor="middle" class="svg-sub" font-size="10.5">computation · confidence · ownership</text>
+              <text x="635" y="320" text-anchor="middle" class="svg-sub" font-size="10.5">arbitration · drafts</text>
+
+              <path d="M635 340 L 635 398" fill="none" class="stroke-ledger" stroke-width="2.2" marker-end="url(#arr-ledger)"/>
+
+              <path d="M490 402 v34 a145 9 0 0 0 290 0 v-34" fill="var(--bg-panel-2)" stroke="var(--border-strong)" stroke-width="1.4"/>
+              <ellipse cx="635" cy="402" rx="145" ry="9" fill="var(--bg-panel-2)" stroke="var(--border-strong)" stroke-width="1.4"/>
+              <ellipse cx="635" cy="436" rx="145" ry="9" fill="none" stroke="var(--border-strong)" stroke-width="1.4"/>
+              <text x="635" y="422" text-anchor="middle" class="svg-sub" font-size="11">ledger_data/ — append-only logs + projections (git)</text>
+
+              <path d="M635 445 L 635 486" fill="none" class="stroke-neutral" stroke-width="2" marker-end="url(#arr-neutral)"/>
+              <text x="660" y="470" class="svg-sub" font-size="10.5">push</text>
+
+              <path d="M545 490 v20 a90 8 0 0 0 180 0 v-20" fill="var(--bg-panel-2)" stroke="var(--border-strong)" stroke-width="1.4"/>
+              <ellipse cx="635" cy="490" rx="90" ry="8" fill="var(--bg-panel-2)" stroke="var(--border-strong)" stroke-width="1.4"/>
+              <ellipse cx="635" cy="510" rx="90" ry="8" fill="none" stroke="var(--border-strong)" stroke-width="1.4"/>
+              <text x="635" y="503" text-anchor="middle" class="svg-sub" font-size="10.5">git remote (backup)</text>
+            </svg>
+          </div>
+
+          <pre class="tree">rez-ops/
+  shared/
+    <span class="c1">ledger_schema/</span>     <span class="cm"># AD-4/9: RawFact + LedgerRecord</span>
+  connectors/           <span class="cm"># Sensors</span>
+    <span class="c1">calendar/</span>
+    <span class="c1">ticketing/</span>
+    <span class="c1">git_repo/</span>
+    <span class="c1">cmdb/</span>
+  <span class="c2">ledger_core/</span>         <span class="cm"># Ledger: computation, confidence,</span>
+                       <span class="cm">#   ownership arbitration, drafts</span>
+  ledger_data/          <span class="cm"># AD-3: append-only + projected state</span>
+    bia/
+    tiering/
+    runbooks/
+    raci/
+    test_records/
+    drafts/             <span class="cm"># AD-6: via ledger-core write tool only</span>
+    _ops.log.md          <span class="cm"># AD-7: scheduled-run failure log</span>
+  .mcp.json              <span class="cm"># project-scoped MCP server registration</span>
+  rezops.config.yaml     <span class="cm"># enabled connectors, tier SLA inputs</span></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- 9: DEFERRED -->
+    <section class="slide" data-title="Deferred">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-clock"/></svg> Deferred, Not Forgotten</span>
+        <h1 class="slide-title">What we're deliberately not doing yet</h1>
+        <h2 class="slide-sub">Every deferral ties back to a brief constraint or an immaturity signal — not an oversight.</h2>
+        <div class="panel">
+          <div class="deferred-item">
+            <svg class="icon"><use href="#i-voice"/></svg>
+            <div><div class="what">Briefing delivery channel (Slack, email, terminal)</div><div class="why">Already scoped as a swappable view over the same model — decide on first real usage, not in the abstract.</div></div>
+          </div>
+          <div class="deferred-item">
+            <svg class="icon"><use href="#i-warn"/></svg>
+            <div><div class="what">Write-back / auto-actioning against systems of record</div><div class="why">Human-approval non-negotiable comes first, per the brief; AD-6 keeps the boundary ready for it, not built yet.</div></div>
+          </div>
+          <div class="deferred-item">
+            <svg class="icon"><use href="#i-box"/></svg>
+            <div><div class="what">MCP SDK v2 migration</div><div class="why">v2.0.0 GA shipped 2026-07-28 — about two weeks old at spine time. Too new to commit to; revisit once it settles.</div></div>
+          </div>
+          <div class="deferred-item">
+            <svg class="icon"><use href="#i-folder"/></svg>
+            <div><div class="what">Packaging — personal config vs. installable product</div><div class="why">Explicitly left open by the brief; not a decision this spine forces.</div></div>
+          </div>
+          <div class="deferred-item">
+            <svg class="icon"><use href="#i-shield"/></svg>
+            <div><div class="what">Multi-user / multi-tenant support</div><div class="why">v1 is single-owner by design, per the brief's stated primary user.</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 10: CLOSING -->
+    <section class="slide" data-title="Closing">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-flag"/></svg> Closing</span>
+        <h1 class="slide-title">Back to the non-negotiables</h1>
+        <h2 class="slide-sub">Every architectural decision earns its place by operationalizing one of the brief's three commitments.</h2>
+        <div class="grid-2">
+          <div class="panel">
+            <div class="np-row">
+              <svg class="icon" style="color:var(--sensor);"><use href="#i-sensor"/></svg>
+              <div><span class="label">Read-only-first</span><span class="txt">Sensors only fetch and normalize. AD-6's draft-not-send boundary blocks any write path from existing, even by accident.</span></div>
+            </div>
+            <div class="np-row">
+              <svg class="icon" style="color:var(--ledger);"><use href="#i-ledger"/></svg>
+              <div><span class="label">Never hide uncertainty</span><span class="txt">AD-5/AD-9 make confidence computed and explicit; AD-10 escalates silence to <code>unknown</code> and an orphan-risk entry, never a guess.</span></div>
+            </div>
+            <div class="np-row">
+              <svg class="icon" style="color:var(--ops);"><use href="#i-gauge"/></svg>
+              <div><span class="label">Graceful degradation</span><span class="txt">AD-8: Rez Ops is additive observation. If it's wrong or down, the program falls back to today's baseline — never worse off.</span></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="kicker" style="margin-bottom:14px;">Next steps</div>
+            <ol class="next-steps">
+              <li>Pick the first connector to build against a real source (calendar or CMDB) and stand up the shared schema module (AD-4/AD-9) alongside it.</li>
+              <li>Stand up the ledger-core skeleton: append-only writer, projection, confidence computation stub (AD-3/AD-5).</li>
+              <li>Wire <code>.mcp.json</code> and confirm headless invocation with autodiscovery intact (AD-7).</li>
+              <li>Run the first end-to-end briefing and validate the confidence/coverage map is visible, not buried.</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <nav class="deck-nav">
+    <button class="nav-btn" id="prevBtn" aria-label="Previous slide"><svg><use href="#i-arrow-l"/></svg></button>
+    <div class="dots" id="dots"></div>
+    <div class="counter"><span id="curNum">1</span> / <span id="totalNum">10</span></div>
+    <button class="nav-btn" id="nextBtn" aria-label="Next slide"><svg><use href="#i-arrow-r"/></svg></button>
+  </nav>
+</div>
+
+<div class="hint" id="hint">Use ← → or click to navigate</div>
+
+<script>
+(function(){
+  var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+  var total = slides.length;
+  var current = 0;
+
+  var curNum = document.getElementById('curNum');
+  var totalNum = document.getElementById('totalNum');
+  var prevBtn = document.getElementById('prevBtn');
+  var nextBtn = document.getElementById('nextBtn');
+  var dotsWrap = document.getElementById('dots');
+  var hint = document.getElementById('hint');
+
+  totalNum.textContent = total;
+
+  slides.forEach(function(s, i){
+    var d = document.createElement('button');
+    d.className = 'dot-btn';
+    d.setAttribute('aria-label', 'Go to slide ' + (i+1) + ': ' + (s.getAttribute('data-title') || ''));
+    d.addEventListener('click', function(e){ e.stopPropagation(); go(i); });
+    dotsWrap.appendChild(d);
+  });
+  var dots = Array.prototype.slice.call(dotsWrap.children);
+
+  function render(){
+    slides.forEach(function(s, i){ s.classList.toggle('active', i === current); });
+    dots.forEach(function(d, i){ d.classList.toggle('active', i === current); });
+    curNum.textContent = current + 1;
+    prevBtn.disabled = current === 0;
+    nextBtn.disabled = current === total - 1;
+  }
+
+  function go(i){
+    current = Math.max(0, Math.min(total - 1, i));
+    render();
+  }
+  function next(){ go(current + 1); }
+  function prev(){ go(current - 1); }
+
+  prevBtn.addEventListener('click', function(e){ e.stopPropagation(); prev(); });
+  nextBtn.addEventListener('click', function(e){ e.stopPropagation(); next(); });
+
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' '){ e.preventDefault(); next(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp'){ e.preventDefault(); prev(); }
+    else if (e.key === 'Home'){ go(0); }
+    else if (e.key === 'End'){ go(total - 1); }
+  });
+
+  // click-through: clicking the slide area (not on a link/button) advances
+  document.getElementById('deck').addEventListener('click', function(e){
+    var interactive = e.target.closest('a, button, .nav-btn, .dot-btn');
+    if (interactive) return;
+    next();
+  });
+
+  render();
+
+  setTimeout(function(){ hint.classList.add('show'); }, 600);
+  setTimeout(function(){ hint.classList.remove('show'); }, 4200);
+})();
+</script>
+
+</body>
+</html>

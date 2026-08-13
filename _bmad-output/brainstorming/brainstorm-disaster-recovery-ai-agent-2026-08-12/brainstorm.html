@@ -1,0 +1,1150 @@
+<title>DR Agent — Session Pulse</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#05070a;
+    --bg2:#0a0f14;
+    --panel:#0b1117;
+    --panel2:#0e1620;
+    --line:rgba(140,200,180,.14);
+    --line-soft:rgba(140,200,180,.07);
+    --fg:#dce8e2;
+    --fg-dim:#8ba299;
+    --fg-dimmer:#5c716a;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+
+    --c1:#4fd8ff;  /* solution matrix - cyan */
+    --c2:#b98bff;  /* disney - violet */
+    --c3:#ffb454;  /* five whys - amber */
+    --c4:#ff5c5c;  /* provocation - red */
+    --c5:#4fe3c1;  /* assumption reversal - teal */
+    --c6:#ff8ad1;  /* observer effect - pink */
+    --c7:#c9d6d0;  /* six hats - neutral */
+    --c8:#ff4d6d;  /* kill the crown jewel - crimson */
+    --c9:#ffa64d;  /* blast radius rewind - orange */
+    --c10:#8fa3c9; /* ownerless object hunt - slate */
+    --c11:#35e28a; /* freshness ledger - green */
+    --c12:#b7d66b; /* ecosystem thinking - olive */
+    --c13:#6fa8ff; /* role playing - blue */
+
+    --c14:#ff6ec7; /* trickster's gambit - magenta */
+    --c15:#d9a55c; /* time shifting - sepia gold */
+    --c16:#e3e35c; /* infomercial at 3am - neon lime */
+    --c17:#8fd9c4; /* elemental forces - turquoise (elements use fixed colors internally) */
+    --c18:#b08d57; /* ancestor council - stone */
+    --c19:#c86bff; /* concept blending - violet blend */
+    --c20:#c97b4a; /* devil's advocate courtroom - wood/rust */
+    --c21:#ff5f96; /* drunk history retelling - scrawl red */
+
+    --gap-red:#ff5c5c;
+    --ok-green:#35e28a;
+    color-scheme: dark;
+  }
+
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#eef2ef;
+      --bg2:#e6ebe7;
+      --panel:#ffffff;
+      --panel2:#f6f8f6;
+      --line:rgba(30,60,50,.16);
+      --line-soft:rgba(30,60,50,.08);
+      --fg:#152019;
+      --fg-dim:#4b5c54;
+      --fg-dimmer:#7c8d85;
+
+      --c1:#0d7ea3;
+      --c2:#7a4fd1;
+      --c3:#a66216;
+      --c4:#c93838;
+      --c5:#128a76;
+      --c6:#b83a86;
+      --c7:#3f4a45;
+      --c8:#b3204a;
+      --c9:#c4661a;
+      --c10:#3f5a86;
+      --c11:#1f9e5f;
+      --c12:#5f7a1a;
+      --c13:#2a5fc4;
+
+      --c14:#a8267e;
+      --c15:#8a6414;
+      --c16:#7a6600;
+      --c17:#17836a;
+      --c18:#6b4f23;
+      --c19:#7a2fb0;
+      --c20:#8a4a1a;
+      --c21:#b3264a;
+
+      --gap-red:#c93838;
+      --ok-green:#1f9e5f;
+      color-scheme: light;
+    }
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(ellipse 900px 500px at 15% -10%, var(--line-soft), transparent 60%),
+      radial-gradient(ellipse 900px 600px at 100% 0%, var(--line-soft), transparent 60%),
+      var(--bg);
+    color:var(--fg);
+    font-family:var(--sans);
+    line-height:1.5;
+    overflow-x:hidden;
+    min-width:0;
+  }
+  img,svg{max-width:100%;display:block;}
+  a{color:inherit;}
+  .mono{font-family:var(--mono);}
+
+  .page{max-width:1080px;margin:0 auto;padding:clamp(14px,4vw,40px);min-width:0;}
+
+  /* ---------- pulse divider ---------- */
+  .pulse{overflow:hidden;height:34px;margin:18px 0;opacity:.85;}
+  .pulse-track{display:flex;width:200%;animation:pulseScroll 7s linear infinite;}
+  .pulse-track svg{flex:0 0 50%;height:34px;width:50%;}
+  .pulse.small{height:20px;margin:10px 0;}
+  .pulse.small .pulse-track svg{height:20px;}
+  @keyframes pulseScroll{from{transform:translateX(0);}to{transform:translateX(-50%);}}
+  @media (prefers-reduced-motion: reduce){ .pulse-track{animation:none;} }
+
+  /* ---------- header ---------- */
+  .hero{border:1px solid var(--line);border-radius:14px;padding:clamp(16px,4vw,32px);background:linear-gradient(180deg,var(--panel),var(--bg2));position:relative;}
+  .hero-top{display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;font-family:var(--mono);font-size:.72rem;letter-spacing:.06em;color:var(--fg-dim);text-transform:uppercase;}
+  .hero-top .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok-green);box-shadow:0 0 8px var(--ok-green);margin-right:6px;vertical-align:middle;animation:blink 2.4s ease-in-out infinite;}
+  @keyframes blink{0%,100%{opacity:1;}50%{opacity:.35;}}
+  h1{font-size:clamp(1.6rem,4.6vw,2.5rem);margin:.5em 0 .2em;letter-spacing:-.01em;}
+  h1 em{font-style:normal;color:var(--c1);}
+  .lede{color:var(--fg-dim);max-width:62ch;font-size:.98rem;}
+  .lede b{color:var(--fg);font-weight:600;}
+  .stat-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;}
+  .stat{font-family:var(--mono);font-size:.72rem;border:1px solid var(--line);border-radius:999px;padding:5px 12px;color:var(--fg-dim);background:var(--panel2);}
+  .stat strong{color:var(--fg);}
+
+  /* ---------- index nav ---------- */
+  .index{display:flex;flex-wrap:wrap;gap:8px;margin:24px 0;padding:0;list-style:none;}
+  .index li{flex:0 0 auto;}
+  .index a{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:.72rem;border:1px solid var(--line);border-radius:8px;padding:6px 10px;text-decoration:none;color:var(--fg-dim);background:var(--panel2);transition:border-color .15s, color .15s;}
+  .index a:hover{color:var(--fg);border-color:var(--accent,var(--fg-dim));}
+  .index .led{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 6px var(--accent);}
+
+  /* ---------- panel ---------- */
+  .panel{border:1px solid var(--line);border-radius:14px;background:var(--panel);margin:20px 0;overflow:hidden;}
+  .panel-head{display:flex;align-items:center;gap:12px;padding:14px clamp(14px,3vw,24px);border-bottom:1px solid var(--line);background:linear-gradient(90deg, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%);}
+  .panel-no{font-family:var(--mono);font-size:.78rem;color:var(--accent);border:1px solid var(--accent);border-radius:6px;padding:2px 7px;flex:0 0 auto;}
+  .panel-head h2{margin:0;font-size:1.05rem;flex:1;min-width:0;}
+  .panel-kind{font-family:var(--mono);font-size:.65rem;text-transform:uppercase;letter-spacing:.08em;color:var(--fg-dimmer);flex:0 0 auto;}
+  .panel-body{padding:clamp(14px,3vw,24px);}
+  .panel-sub{color:var(--fg-dim);font-size:.85rem;margin:0 0 16px;}
+  .panel-sub .kicker{font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);display:block;margin-bottom:4px;}
+
+  .note{border:1px dashed var(--line);border-radius:10px;padding:10px 14px;font-family:var(--mono);font-size:.75rem;color:var(--fg-dimmer);margin:0 0 16px;}
+  .note b{color:var(--fg-dim);}
+
+  /* ---------- badges ---------- */
+  .badge{display:inline-block;font-family:var(--mono);font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;border-radius:5px;padding:2px 7px;margin-bottom:6px;}
+  .badge-idea{background:color-mix(in srgb, var(--ok-green) 18%, transparent);color:var(--ok-green);}
+  .badge-gap{background:color-mix(in srgb, var(--gap-red) 18%, transparent);color:var(--gap-red);}
+  .badge-insight{background:color-mix(in srgb, var(--c1) 18%, transparent);color:var(--c1);}
+  .badge-meta{background:color-mix(in srgb, var(--fg-dim) 16%, transparent);color:var(--fg-dim);}
+
+  /* ================= 1. SOLUTION MATRIX ================= */
+  .scrollx{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:10px;border:1px solid var(--line);}
+  table.matrix{border-collapse:collapse;width:100%;min-width:760px;font-size:.8rem;}
+  table.matrix th,table.matrix td{border:1px solid var(--line);padding:9px 10px;vertical-align:top;text-align:left;}
+  table.matrix thead th{background:var(--panel2);font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-dim);position:sticky;top:0;}
+  table.matrix tbody th{background:var(--panel2);font-weight:600;white-space:nowrap;font-size:.82rem;}
+  td.cell{width:180px;}
+  td.cell.filled{background:color-mix(in srgb, var(--c1) 8%, transparent);border-left:3px solid var(--c1);}
+  td.cell.filled .txt{font-size:.74rem;color:var(--fg-dim);}
+  td.cell.gap{background:color-mix(in srgb, var(--gap-red) 8%, transparent);border-left:3px solid var(--gap-red);}
+  td.cell.gap .txt{font-size:.74rem;color:var(--fg-dim);}
+  td.cell.empty{background:repeating-linear-gradient(135deg, var(--line-soft) 0 6px, transparent 6px 12px);}
+  .callout{margin-top:16px;border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:var(--panel2);}
+  .callout .kicker{font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:var(--c1);display:block;margin-bottom:8px;}
+  .callout p{margin:0 0 8px;font-size:.88rem;color:var(--fg-dim);}
+  .callout p:last-child{margin-bottom:0;}
+
+  /* ================= 2. DISNEY METHOD ================= */
+  .disney-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+  @media (max-width:760px){.disney-grid{grid-template-columns:1fr;}}
+  .disney-col{border-radius:10px;padding:14px;border:1px solid var(--line);min-width:0;}
+  .disney-col h3{margin:0 0 10px;font-size:.85rem;font-family:var(--mono);text-transform:uppercase;letter-spacing:.06em;}
+  .disney-col ul{margin:0;padding:0;list-style:none;}
+  .disney-col li{font-size:.85rem;color:var(--fg-dim);margin-bottom:10px;padding-left:14px;border-left:2px solid var(--line);}
+  .disney-col li:last-child{margin-bottom:0;}
+  .dreamer{background:radial-gradient(circle at 30% 0%, color-mix(in srgb, var(--c2) 14%, transparent), transparent 70%);}
+  .dreamer h3{color:var(--c2);}
+  .dreamer li{border-left-color:var(--c2);filter:blur(0);}
+  .realist{background:linear-gradient(var(--line-soft) 1px, transparent 1px) 0 0/100% 18px, var(--panel2);}
+  .realist h3{color:var(--fg);}
+  .realist li{border-left-color:var(--fg-dimmer);font-family:var(--mono);font-size:.78rem;}
+  .critic{background:var(--panel2);}
+  .critic h3{color:var(--gap-red);}
+  .critic li{border-left-color:var(--gap-red);position:relative;}
+
+  /* ================= 3. FIVE WHYS ================= */
+  .why-chain{position:relative;padding-left:26px;margin:0 0 18px;}
+  .why-chain::before{content:"";position:absolute;left:9px;top:6px;bottom:6px;width:2px;background:linear-gradient(var(--line), var(--c3));}
+  .why-step{position:relative;margin-bottom:16px;}
+  .why-step::before{content:"";position:absolute;left:-26px;top:3px;width:11px;height:11px;border-radius:50%;background:var(--bg);border:2px solid var(--c3);}
+  .why-step .lbl{font-family:var(--mono);font-size:.68rem;color:var(--c3);text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:3px;}
+  .why-step p{margin:0;font-size:.88rem;color:var(--fg-dim);}
+  .root-cause{border-radius:12px;padding:16px 18px;border:1px solid var(--c3);background:radial-gradient(circle at 20% 20%, color-mix(in srgb, var(--c3) 20%, transparent), transparent 70%);margin-top:6px;}
+  .root-cause .lbl{font-family:var(--mono);font-size:.7rem;color:var(--c3);text-transform:uppercase;letter-spacing:.08em;display:block;margin-bottom:6px;}
+  .root-cause p{margin:0;font-size:.92rem;}
+  .why-extra{margin-top:12px;font-size:.85rem;color:var(--fg-dim);border-left:2px solid var(--line);padding-left:12px;}
+
+  /* ================= 4. PROVOCATION ================= */
+  .po-list{display:flex;flex-direction:column;gap:10px;}
+  .po-item{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--panel2);}
+  @media (max-width:640px){.po-item{grid-template-columns:1fr;}}
+  .po-item .po{font-size:.85rem;color:var(--fg-dimmer);text-decoration:line-through;text-decoration-color:var(--c4);text-decoration-thickness:1.5px;}
+  .po-item .po .lbl{display:block;font-family:var(--mono);font-size:.62rem;color:var(--c4);text-transform:uppercase;letter-spacing:.06em;text-decoration:none;margin-bottom:4px;}
+  .po-item .arrow{font-family:var(--mono);color:var(--c4);text-align:center;font-size:1.1rem;}
+  @media (max-width:640px){.po-item .arrow{transform:rotate(90deg);}}
+  .po-item .mined{font-size:.85rem;}
+  .po-item .mined .lbl{display:block;font-family:var(--mono);font-size:.62rem;color:var(--ok-green);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;}
+
+  /* ================= 5. ASSUMPTION REVERSAL ================= */
+  .rev-list{display:flex;flex-direction:column;gap:10px;}
+  .rev-item{display:grid;grid-template-columns:1fr 26px 1fr;gap:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;}
+  @media (max-width:640px){.rev-item{grid-template-columns:1fr;}}
+  .rev-item .assum{padding:12px 14px;background:var(--panel2);color:var(--fg-dimmer);}
+  .rev-item .assum p{text-decoration:line-through;text-decoration-color:var(--fg-dimmer);margin:0;font-size:.83rem;}
+  .rev-item .flip{display:flex;align-items:center;justify-content:center;font-family:var(--mono);color:var(--c5);background:var(--panel);}
+  @media (max-width:640px){.rev-item .flip{padding:4px 0;}}
+  .rev-item .revd{padding:12px 14px;background:color-mix(in srgb, var(--c5) 9%, transparent);border-left:3px solid var(--c5);}
+  .rev-item .revd p{margin:0;font-size:.86rem;}
+  .rev-item .lbl{display:block;font-family:var(--mono);font-size:.6rem;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;color:var(--fg-dimmer);}
+  .rev-item .revd .lbl{color:var(--c5);}
+
+  /* ================= 6. OBSERVER EFFECT ================= */
+  .obs-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;}
+  @media (max-width:700px){.obs-grid{grid-template-columns:1fr;}}
+  .obs-item{display:flex;gap:10px;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--panel2);min-width:0;}
+  .obs-loop{flex:0 0 auto;width:30px;height:30px;border-radius:50%;border:2px solid var(--c6);border-right-color:transparent;position:relative;animation:spin 3.5s linear infinite;}
+  .obs-loop::after{content:"";position:absolute;top:-3px;right:-1px;width:6px;height:6px;border-radius:50%;background:var(--c6);}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  @media (prefers-reduced-motion: reduce){.obs-loop{animation:none;}}
+  .obs-item p{margin:0;font-size:.83rem;color:var(--fg-dim);}
+
+  /* ================= 7. SIX HATS ================= */
+  .hat-grid{display:grid;grid-template-columns:1fr;gap:10px;}
+  .hat-item{display:grid;grid-template-columns:110px 1fr;gap:12px;align-items:start;}
+  @media (max-width:560px){.hat-item{grid-template-columns:1fr;gap:6px;}}
+  .hat-chip{font-family:var(--mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;border-radius:7px;padding:6px 10px;text-align:center;font-weight:600;}
+  .hat-item p{margin:0;font-size:.87rem;color:var(--fg-dim);align-self:center;}
+  .hat-white{background:#eef1ef;color:#12251c;border:1px solid #b9c6bf;}
+  .hat-red{background:#c8384a;color:#fff;}
+  .hat-yellow{background:#e3bd3f;color:#2a2005;}
+  .hat-black{background:#191919;color:#eee;border:1px solid #444;}
+  .hat-green{background:#2f9e63;color:#fff;}
+  .hat-blue{background:#3d76c9;color:#fff;}
+
+  /* ================= 8. KILL THE CROWN JEWEL ================= */
+  .jewel{text-align:center;padding:22px 10px 8px;}
+  .jewel .item{display:inline-block;font-family:var(--mono);font-size:1.05rem;padding:10px 18px;border:1px dashed var(--c8);border-radius:8px;color:var(--fg-dimmer);text-decoration:line-through;text-decoration-color:var(--c8);text-decoration-thickness:2px;transform:rotate(-1deg);}
+  .jewel .item::before{content:"✕ ELIMINATED ✕";display:block;font-size:.62rem;letter-spacing:.1em;color:var(--c8);margin-bottom:6px;text-decoration:none;}
+  .regrowth{margin-top:18px;}
+  .regrowth .lbl{font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ok-green);display:block;margin-bottom:10px;text-align:center;}
+  .regrowth ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px;}
+  .regrowth li{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--panel2);font-size:.85rem;color:var(--fg-dim);position:relative;padding-left:26px;}
+  .regrowth li::before{content:"↳";position:absolute;left:10px;color:var(--ok-green);}
+
+  /* ================= 9. BLAST RADIUS REWIND ================= */
+  .radar-wrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap;}
+  .radar{flex:0 0 auto;width:88px;height:88px;border-radius:50%;position:relative;background:
+      radial-gradient(circle, transparent 0 28%, var(--line) 28% 29%, transparent 29% 48%, var(--line) 48% 49%, transparent 49% 68%, var(--line) 68% 69%, transparent 69% 100%);}
+  .radar::after{content:"";position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg, color-mix(in srgb, var(--c9) 55%, transparent), transparent 35%);animation:sweep 3.6s linear infinite;}
+  @keyframes sweep{to{transform:rotate(360deg);}}
+  @media (prefers-reduced-motion: reduce){.radar::after{animation:none;}}
+  .radar-def{flex:1;min-width:220px;font-size:.87rem;color:var(--fg-dim);margin:0;}
+  .find-list{list-style:none;margin:16px 0 0;padding:0;display:flex;flex-direction:column;gap:10px;}
+  .find-list li{border-left:3px solid var(--c9);background:var(--panel2);border-radius:0 8px 8px 0;padding:10px 14px;font-size:.85rem;color:var(--fg-dim);}
+
+  /* ================= 10. OWNERLESS OBJECT HUNT ================= */
+  .orphan-wrap{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px;}
+  .orphan-tag{flex:0 0 auto;width:56px;height:56px;border-radius:8px;border:2px dashed var(--c10);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:1.4rem;color:var(--c10);}
+  .orphan-def{flex:1;min-width:220px;font-size:.87rem;color:var(--fg-dim);margin:0;}
+  .orphan-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px;}
+  .orphan-list li{border:1px solid var(--line);border-radius:10px;padding:10px 14px 10px 34px;background:var(--panel2);font-size:.85rem;color:var(--fg-dim);position:relative;}
+  .orphan-list li::before{content:"?";position:absolute;left:12px;top:9px;color:var(--c10);font-family:var(--mono);font-weight:700;}
+
+  /* ================= 11. FRESHNESS LEDGER ================= */
+  table.ledger{border-collapse:collapse;width:100%;min-width:640px;font-size:.8rem;}
+  table.ledger th,table.ledger td{border:1px solid var(--line);padding:9px 10px;text-align:left;}
+  table.ledger thead th{background:var(--panel2);font-family:var(--mono);font-size:.66rem;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-dim);}
+  table.ledger td.filled{color:var(--fg);}
+  table.ledger td.unspecified{color:var(--fg-dimmer);font-family:var(--mono);}
+  .heat-demo{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap;}
+  .heat-grid{display:grid;grid-template-columns:repeat(5,16px);grid-auto-rows:16px;gap:3px;}
+  .heat-grid span{border-radius:2px;}
+  .heat-cap{font-size:.72rem;color:var(--fg-dimmer);font-family:var(--mono);}
+
+  /* ================= 12. ECOSYSTEM THINKING ================= */
+  .eco-web{position:relative;}
+  .eco-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+  @media (max-width:760px){.eco-grid{grid-template-columns:1fr 1fr;}}
+  @media (max-width:520px){.eco-grid{grid-template-columns:1fr;}}
+  .eco-card{border:1px solid var(--line);border-radius:50% / 18%;border-radius:14px;padding:14px;background:radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--c12) 12%, transparent), var(--panel2) 70%);min-width:0;}
+  .eco-card .role{font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--c12);display:block;margin-bottom:8px;}
+  .eco-card p{margin:0;font-size:.83rem;color:var(--fg-dim);}
+
+  /* ================= 13. ROLE PLAYING ================= */
+  .voice-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;}
+  @media (max-width:700px){.voice-grid{grid-template-columns:1fr;}}
+  .voice{border:1px solid var(--line);border-radius:14px 14px 14px 4px;padding:14px;background:var(--panel2);position:relative;min-width:0;}
+  .voice .role{font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;color:var(--c13);display:block;margin-bottom:8px;}
+  .voice p{margin:0;font-size:.87rem;font-style:italic;}
+  .voice p::before{content:"“";}
+  .voice p::after{content:"”";}
+
+  /* ================= ROUND 2 DIVIDER ================= */
+  .round2-divider{margin:34px 0 22px;text-align:center;position:relative;}
+  .round2-divider::before{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:var(--line);}
+  .round2-divider .r2-label{display:inline-block;font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--fg-dim);background:var(--bg);padding:0 14px;position:relative;z-index:1;}
+  .round2-note{max-width:66ch;margin:12px auto 0;font-size:.82rem;color:var(--fg-dimmer);font-family:var(--mono);text-align:center;}
+
+  /* ================= 14. TRICKSTER'S GAMBIT ================= */
+  .trick-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;}
+  @media (max-width:700px){.trick-grid{grid-template-columns:1fr;}}
+  .trick-card{--tilt:-1deg;border:1px solid var(--line);border-radius:12px;padding:16px 14px 14px;background:repeating-linear-gradient(-45deg, color-mix(in srgb, var(--c14) 7%, transparent) 0 10px, transparent 10px 20px), var(--panel2);position:relative;transform:rotate(var(--tilt));min-width:0;}
+  .trick-card:nth-child(even){--tilt:1deg;}
+  .trick-card .ribbon{position:absolute;top:-9px;right:12px;font-family:var(--mono);font-size:.58rem;letter-spacing:.07em;text-transform:uppercase;background:var(--c14);color:var(--bg);padding:3px 9px;border-radius:5px;transform:rotate(4deg);white-space:nowrap;}
+  .trick-card .rule{font-size:.8rem;color:var(--fg-dimmer);text-decoration:line-through;text-decoration-color:var(--c14);margin:8px 0 10px;}
+  .trick-card .rule .lbl{display:block;font-family:var(--mono);font-size:.6rem;color:var(--c14);text-transform:uppercase;letter-spacing:.06em;text-decoration:none;margin-bottom:3px;}
+  .trick-card .cheat{font-size:.86rem;color:var(--fg);}
+  .trick-card .cheat .lbl{display:block;font-family:var(--mono);font-size:.6rem;color:var(--ok-green);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px;}
+
+  /* ================= 15. TIME SHIFTING ================= */
+  .time-track{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  @media (max-width:700px){.time-track{grid-template-columns:1fr;}}
+  .era{border-radius:12px;padding:16px;min-width:0;}
+  .era-past{background:linear-gradient(180deg, color-mix(in srgb, var(--c15) 16%, transparent), var(--panel2));border:1px solid color-mix(in srgb, var(--c15) 45%, var(--line));}
+  .era-past p{font-family:Georgia,"Times New Roman",serif;font-size:.92rem;color:var(--fg);margin:0;}
+  .era-future{background:var(--panel2);border:1px solid var(--line);position:relative;overflow:hidden;}
+  .era-future::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(0deg, var(--line-soft) 0 1px, transparent 1px 7px);opacity:.6;pointer-events:none;}
+  .era-lbl{font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--c15);display:block;margin-bottom:12px;position:relative;z-index:1;}
+  .era-future ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:10px;position:relative;z-index:1;}
+  .era-future li{font-family:var(--mono);font-size:.8rem;color:var(--fg-dim);border-left:2px solid var(--c15);padding-left:10px;}
+
+  /* ================= 16. INFOMERCIAL AT 3AM ================= */
+  .info-card{border:2px dashed var(--c16);border-radius:12px;padding:18px 16px 14px;background:repeating-linear-gradient(135deg, color-mix(in srgb, var(--c16) 12%, transparent) 0 14px, transparent 14px 28px);position:relative;margin-bottom:14px;}
+  .info-card .starburst{position:absolute;top:-13px;left:14px;font-family:var(--mono);font-weight:700;font-size:.62rem;letter-spacing:.05em;text-transform:uppercase;background:var(--c16);color:#151200;padding:4px 10px;border-radius:999px;transform:rotate(-3deg);box-shadow:0 2px 10px rgba(0,0,0,.35);white-space:nowrap;}
+  .info-card p{margin:6px 0 0;font-size:.9rem;color:var(--fg);}
+  .info-card p b{color:color-mix(in srgb, var(--c16) 80%, var(--fg));}
+  .info-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;}
+  .info-list li{font-size:.85rem;color:var(--fg-dim);border-left:3px solid var(--c16);background:var(--panel2);border-radius:0 8px 8px 0;padding:9px 12px;}
+
+  /* ================= 17. ELEMENTAL FORCES ================= */
+  .elem-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;}
+  @media (max-width:760px){.elem-grid{grid-template-columns:repeat(2,1fr);}}
+  .elem-card{border-radius:12px;padding:14px;min-width:0;color:#fff;position:relative;overflow:hidden;}
+  .elem-card .icon{width:30px;height:30px;margin-bottom:10px;}
+  .elem-card .name{display:block;font-family:var(--mono);font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;opacity:.85;}
+  .elem-card p{margin:0;font-size:.8rem;line-height:1.45;}
+  .elem-fire{background:linear-gradient(160deg,#ff7b3d,#b3202a);}
+  .elem-water{background:linear-gradient(160deg,#3da9ff,#1d4f9e);}
+  .elem-earth{background:linear-gradient(160deg,#8a6b3d,#3d4a24);}
+  .elem-air{background:linear-gradient(160deg,#cfe8e6,#6c8f94);color:#132022;}
+  .elem-air .name{opacity:.65;}
+  .icon-flame{clip-path:polygon(50% 0%,80% 35%,70% 40%,90% 70%,50% 100%,10% 70%,30% 40%,20% 35%);background:rgba(255,255,255,.85);}
+  .icon-drop{border-radius:0 50% 50% 50%;transform:rotate(45deg);background:rgba(255,255,255,.85);}
+  .icon-mtn{width:0;height:0;border-left:15px solid transparent;border-right:15px solid transparent;border-bottom:26px solid rgba(255,255,255,.85);}
+  .icon-wind{display:flex;flex-direction:column;gap:4px;justify-content:center;height:30px;}
+  .icon-wind span{display:block;height:3px;border-radius:2px;background:rgba(19,32,34,.55);}
+  .icon-wind span:nth-child(1){width:70%;}
+  .icon-wind span:nth-child(2){width:100%;}
+  .icon-wind span:nth-child(3){width:55%;}
+
+  /* ================= 18. ANCESTOR COUNCIL ================= */
+  .council-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;}
+  @media (max-width:760px){.council-grid{grid-template-columns:1fr;}}
+  .plaque{border:1px solid color-mix(in srgb, var(--c18) 45%, var(--line));border-radius:8px 8px 4px 4px;padding:18px 14px 16px;background:linear-gradient(180deg, color-mix(in srgb, var(--c18) 12%, var(--panel2)), var(--panel2));text-align:center;position:relative;min-width:0;}
+  .plaque::before{content:"";position:absolute;top:8px;left:50%;transform:translateX(-50%);width:36px;height:3px;border-radius:2px;background:color-mix(in srgb, var(--c18) 60%, transparent);}
+  .plaque .elder{display:block;font-family:var(--mono);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;color:var(--c18);margin:12px 0 10px;}
+  .plaque p{margin:0;font-size:.85rem;color:var(--fg);font-style:italic;}
+  .reconcile{margin-top:16px;border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:var(--panel2);}
+  .reconcile .kicker{font-family:var(--mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.08em;color:var(--c18);display:block;margin-bottom:8px;}
+  .reconcile p{margin:0;font-size:.87rem;color:var(--fg-dim);}
+
+  /* ================= 19. CONCEPT BLENDING ================= */
+  .blend-list{display:flex;flex-direction:column;gap:18px;}
+  .blend-item{border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--panel2);}
+  .blend-inputs{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;}
+  .blend-chip{font-family:var(--mono);font-size:.76rem;border:1px solid var(--line);border-radius:999px;padding:6px 14px;color:var(--fg-dim);background:var(--panel);}
+  .blend-plus{font-family:var(--mono);color:var(--c19);font-size:1rem;}
+  .blend-out{display:flex;justify-content:center;margin-bottom:10px;}
+  .blend-pill{font-family:var(--mono);font-weight:700;font-size:.85rem;letter-spacing:.03em;border-radius:999px;padding:8px 18px;color:#0a0410;background:linear-gradient(120deg, var(--c19), var(--c1));box-shadow:0 4px 16px -6px color-mix(in srgb, var(--c19) 60%, transparent);white-space:nowrap;}
+  .blend-item p.desc{margin:0;font-size:.87rem;color:var(--fg-dim);text-align:center;max-width:60ch;margin-left:auto;margin-right:auto;}
+
+  /* ================= 20. DEVIL'S ADVOCATE COURTROOM ================= */
+  .court-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;}
+  @media (max-width:700px){.court-grid{grid-template-columns:1fr;}}
+  .court-col h3{margin:0 0 10px;font-family:var(--mono);font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;}
+  .prosecution h3{color:var(--gap-red);}
+  .defense h3{color:var(--ok-green);}
+  .court-col ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:10px;}
+  .prosecution li{border-left:3px solid var(--gap-red);background:var(--panel2);border-radius:0 8px 8px 0;padding:10px 12px;font-size:.85rem;color:var(--fg-dim);}
+  .defense li{border-left:3px solid var(--ok-green);background:var(--panel2);border-radius:0 8px 8px 0;padding:10px 12px;font-size:.85rem;color:var(--fg-dim);}
+  .verdict-banner{border:1px solid var(--c20);border-radius:10px;padding:16px 18px;text-align:center;background:radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--c20) 20%, transparent), transparent 70%);}
+  .verdict-banner .kicker{display:block;font-family:var(--mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--c20);margin-bottom:8px;}
+  .verdict-banner p{margin:0;font-size:.92rem;color:var(--fg);}
+
+  /* ================= 21. DRUNK HISTORY RETELLING ================= */
+  .drunk-wrap{display:flex;flex-direction:column;gap:14px;margin-bottom:22px;}
+  .drunk-card{--dtilt:-.6deg;border:2px solid var(--c21);border-radius:18px 6px 16px 8px;padding:14px 18px;background:var(--panel2);transform:rotate(var(--dtilt));position:relative;}
+  .drunk-card:nth-of-type(2){--dtilt:.5deg;}
+  .drunk-card .tag{display:inline-block;font-family:var(--mono);font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;color:var(--c21);border-bottom:2px dotted var(--c21);margin-bottom:8px;}
+  .drunk-card p{margin:0;font-size:1rem;color:var(--fg);font-family:"Comic Sans MS","Segoe Print",var(--sans);line-height:1.55;}
+
+  .tagline-banner{margin-top:4px;border:1px solid var(--line);border-radius:16px;padding:clamp(18px,4vw,30px);background:linear-gradient(135deg, color-mix(in srgb, var(--ok-green) 10%, var(--panel)), color-mix(in srgb, var(--gap-red) 6%, var(--panel)));text-align:center;position:relative;overflow:hidden;}
+  .tagline-row{display:flex;align-items:center;justify-content:center;gap:18px;flex-wrap:wrap;margin-bottom:8px;}
+  .tagline-side{display:flex;flex-direction:column;align-items:center;gap:8px;}
+  .tagline-side .label{font-family:var(--mono);font-weight:700;font-size:clamp(1rem,3.2vw,1.5rem);letter-spacing:.02em;}
+  .tagline-side.smoke .label{color:var(--ok-green);text-shadow:0 0 18px color-mix(in srgb, var(--ok-green) 50%, transparent);}
+  .tagline-side.fire .label{color:var(--fg-dimmer);text-decoration:line-through;text-decoration-color:var(--gap-red);}
+  .tagline-vs{font-family:var(--mono);font-size:.8rem;color:var(--fg-dimmer);text-transform:uppercase;letter-spacing:.1em;}
+  .smoke-icon{width:26px;height:26px;border-radius:50%;border:3px solid var(--ok-green);position:relative;animation:blink 2s ease-in-out infinite;}
+  .smoke-icon::after{content:"";position:absolute;inset:6px;border-radius:50%;background:var(--ok-green);}
+  @media (prefers-reduced-motion: reduce){.smoke-icon{animation:none;}}
+  .fire-icon{width:22px;height:28px;border:2px solid var(--fg-dimmer);border-radius:2px;position:relative;opacity:.55;}
+  .fire-icon::before{content:"";position:absolute;top:-6px;left:2px;right:2px;height:4px;background:var(--fg-dimmer);border-radius:2px;}
+  .tagline-sub{font-family:var(--mono);font-size:.72rem;color:var(--fg-dim);margin-top:10px;max-width:60ch;margin-left:auto;margin-right:auto;}
+
+  /* ================= SYNTHESIS ================= */
+  .synthesis{border-color:color-mix(in srgb, var(--ok-green) 40%, var(--line));box-shadow:0 0 60px -20px color-mix(in srgb, var(--ok-green) 40%, transparent);}
+  .conv-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-bottom:22px;}
+  @media (max-width:700px){.conv-grid{grid-template-columns:1fr;}}
+  .conv{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--panel2);position:relative;}
+  .conv .n{font-family:var(--mono);font-size:.68rem;color:var(--ok-green);display:block;margin-bottom:6px;letter-spacing:.06em;text-transform:uppercase;}
+  .conv p{margin:0;font-size:.83rem;color:var(--fg-dim);}
+  .conv.strongest{border-color:var(--ok-green);background:color-mix(in srgb, var(--ok-green) 8%, var(--panel2));}
+
+  .core{border:1px solid var(--ok-green);border-radius:14px;padding:20px clamp(14px,4vw,26px);background:radial-gradient(circle at 30% 0%, color-mix(in srgb, var(--ok-green) 16%, transparent), transparent 70%);margin-top:8px;}
+  .core .kicker{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ok-green);display:block;margin-bottom:4px;}
+  .core h3{margin:.2em 0 14px;font-size:1.15rem;}
+  .core ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:10px;}
+  .core li{padding-left:20px;position:relative;font-size:.9rem;color:var(--fg);}
+  .core li::before{content:"▸";position:absolute;left:0;color:var(--ok-green);}
+  .core .pending{display:inline-block;margin-top:14px;font-family:var(--mono);font-size:.68rem;color:var(--fg-dimmer);border:1px dashed var(--fg-dimmer);border-radius:6px;padding:4px 8px;}
+
+  /* ================= SYNTHESIS II ================= */
+  .synthesis2{border-color:color-mix(in srgb, var(--c19) 45%, var(--line));box-shadow:0 0 60px -20px color-mix(in srgb, var(--c19) 40%, transparent);}
+  .hybrid-row{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0 22px;justify-content:center;}
+  .hybrid-row .blend-pill{font-size:.78rem;padding:7px 14px;}
+  .nonneg-list{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:9px;}
+  .nonneg-list li{padding-left:22px;position:relative;font-size:.87rem;color:var(--fg-dim);}
+  .nonneg-list li::before{content:"✓";position:absolute;left:0;color:var(--ok-green);font-family:var(--mono);}
+  .syn2-lead{font-size:.9rem;color:var(--fg-dim);max-width:70ch;margin:0 0 4px;}
+
+  footer{margin:30px 0 10px;font-family:var(--mono);font-size:.78rem;color:var(--fg-dimmer);border-top:1px solid var(--line);padding-top:16px;}
+  footer .cursor{display:inline-block;width:7px;height:14px;background:var(--ok-green);vertical-align:middle;margin-left:4px;animation:blink 1.1s step-end infinite;}
+</style>
+
+<div class="page">
+
+  <!-- ============ HEADER ============ -->
+  <header class="hero">
+    <div class="hero-top">
+      <span><span class="dot"></span>SESSION LOG · DR-AGENT-BRAINSTORM</span>
+      <span>21 TECHNIQUES · 2 ROUNDS · STATUS: COMPLETE · 2026-08-12</span>
+    </div>
+    <h1>Giving Disaster Recovery <em>a Pulse</em></h1>
+    <p class="lede">
+      <b>Topic:</b> an AI-powered pluggable agent/framework (built on Claude Code / Cowork / Gemini / Codex, etc.) that manages an end-to-end Disaster Recovery program — auditing or adapting an existing program, or bootstrapping one from greenfield — by connecting to BIA, inventory/tiering, runbooks, playbooks, RACI, test-tracker, and scheduling data via MCP, API, git, and file sources, driving proactive dependency mapping and stakeholder engagement, producing daily human-in-the-loop briefings, and automating documentation and compliance.
+    </p>
+    <p class="lede">
+      <b>Goal:</b> shift DR program management from reactive to proactive; minimize Olu's manual effort while keeping human-in-the-loop; never miss a dependency or impact from a change; automate documentation and compliance.
+    </p>
+
+    <div class="pulse big" aria-hidden="true">
+      <div class="pulse-track">
+        <svg viewBox="0 0 400 40" preserveAspectRatio="none"><polyline points="0,20 40,20 55,20 65,5 75,36 85,20 100,20 140,20 155,20 165,5 175,36 185,20 200,20 240,20 255,20 265,5 275,36 285,20 300,20 340,20 355,20 365,5 375,36 385,20 400,20" fill="none" stroke="var(--ok-green)" stroke-width="2"/></svg>
+        <svg viewBox="0 0 400 40" preserveAspectRatio="none"><polyline points="0,20 40,20 55,20 65,5 75,36 85,20 100,20 140,20 155,20 165,5 175,36 185,20 200,20 240,20 255,20 265,5 275,36 285,20 300,20 340,20 355,20 365,5 375,36 385,20 400,20" fill="none" stroke="var(--ok-green)" stroke-width="2"/></svg>
+      </div>
+    </div>
+
+    <div class="stat-row">
+      <span class="stat">MODE <strong>AUTONOMOUS</strong></span>
+      <span class="stat">TECHNIQUES <strong>21</strong></span>
+      <span class="stat">IDEAS LOGGED <strong>~115</strong></span>
+      <span class="stat">INVENTED TECHNIQUES <strong>3</strong></span>
+      <span class="stat">RANDOM-DRAWN (ROUND 2) <strong>8</strong></span>
+      <span class="stat">SYNTHESES <strong>2</strong></span>
+      <span class="stat">UPDATED <strong>2026-08-12T16:10</strong></span>
+    </div>
+  </header>
+
+  <!-- ============ INDEX ============ -->
+  <ul class="index">
+    <li><a href="#t1" style="--accent:var(--c1)"><span class="led"></span>01 Solution Matrix</a></li>
+    <li><a href="#t2" style="--accent:var(--c2)"><span class="led"></span>02 Disney Method</a></li>
+    <li><a href="#t3" style="--accent:var(--c3)"><span class="led"></span>03 Five Whys</a></li>
+    <li><a href="#t4" style="--accent:var(--c4)"><span class="led"></span>04 Provocation</a></li>
+    <li><a href="#t5" style="--accent:var(--c5)"><span class="led"></span>05 Assumption Reversal</a></li>
+    <li><a href="#t6" style="--accent:var(--c6)"><span class="led"></span>06 Observer Effect</a></li>
+    <li><a href="#t7" style="--accent:var(--c7)"><span class="led"></span>07 Six Thinking Hats</a></li>
+    <li><a href="#t8" style="--accent:var(--c8)"><span class="led"></span>08 Kill the Crown Jewel</a></li>
+    <li><a href="#t9" style="--accent:var(--c9)"><span class="led"></span>09 Blast Radius Rewind</a></li>
+    <li><a href="#t10" style="--accent:var(--c10)"><span class="led"></span>10 Ownerless Object Hunt</a></li>
+    <li><a href="#t11" style="--accent:var(--c11)"><span class="led"></span>11 Freshness Ledger</a></li>
+    <li><a href="#t12" style="--accent:var(--c12)"><span class="led"></span>12 Ecosystem Thinking</a></li>
+    <li><a href="#t13" style="--accent:var(--c13)"><span class="led"></span>13 Role Playing</a></li>
+    <li><a href="#synthesis" style="--accent:var(--ok-green)"><span class="led"></span>⬤ Synthesis I</a></li>
+    <li><a href="#t14" style="--accent:var(--c14)"><span class="led"></span>14 Trickster's Gambit</a></li>
+    <li><a href="#t15" style="--accent:var(--c15)"><span class="led"></span>15 Time Shifting</a></li>
+    <li><a href="#t16" style="--accent:var(--c16)"><span class="led"></span>16 Infomercial at 3AM</a></li>
+    <li><a href="#t17" style="--accent:var(--c17)"><span class="led"></span>17 Elemental Forces</a></li>
+    <li><a href="#t18" style="--accent:var(--c18)"><span class="led"></span>18 Ancestor Council</a></li>
+    <li><a href="#t19" style="--accent:var(--c19)"><span class="led"></span>19 Concept Blending</a></li>
+    <li><a href="#t20" style="--accent:var(--c20)"><span class="led"></span>20 Devil's Advocate Courtroom</a></li>
+    <li><a href="#t21" style="--accent:var(--c21)"><span class="led"></span>21 Drunk History Retelling</a></li>
+    <li><a href="#synthesis2" style="--accent:var(--c19)"><span class="led"></span>⬤⬤ Synthesis II</a></li>
+  </ul>
+
+  <main>
+
+    <!-- ============ 1. SOLUTION MATRIX ============ -->
+    <section id="t1" class="panel" style="--accent:var(--c1)">
+      <div class="panel-head"><span class="panel-no">01</span><h2>Solution Matrix</h2><span class="panel-kind">technique · convergent</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">grid</span>Domain × connector type. Filled cells are ideas mined in-session; dashed red cells are gaps the coach flagged; hatched cells were left unrecorded.</p>
+
+        <div class="note"><b>session note —</b> mid-session the user switched facilitation mode from Creative Partner to "Ideate for me"; the already-agreed 13-technique batch was honored, with the coach generating the remainder solo.</div>
+
+        <div class="scrollx">
+          <table class="matrix">
+            <thead>
+              <tr><th>Domain</th><th>MCP</th><th>API</th><th>Git / File</th><th>Scheduled poll</th><th>Human report-in</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th>RACI</th>
+                <td class="cell filled"><span class="txt">Live query against HR/org-chart or ITSM tool for real-time ownership instead of a static RACI doc.</span></td>
+                <td class="cell empty"></td><td class="cell empty"></td><td class="cell empty"></td><td class="cell empty"></td>
+              </tr>
+              <tr>
+                <th>BIA</th>
+                <td class="cell empty"></td><td class="cell empty"></td>
+                <td class="cell gap"><span class="txt">GAP — BIAs live in Word/Excel/SharePoint today, not git — possibly the biggest gap worth solving.</span></td>
+                <td class="cell empty"></td><td class="cell empty"></td>
+              </tr>
+              <tr>
+                <th>Runbooks / Playbooks</th>
+                <td class="cell empty"></td><td class="cell empty"></td>
+                <td class="cell filled"><span class="txt">Store runbooks as executable markdown the agent can diff, lint, and auto-PR when the underlying system changes.</span></td>
+                <td class="cell empty"></td>
+                <td class="cell filled"><span class="txt">Incident commanders narrate a live drill in chat and the agent auto-transcribes it into an updated playbook draft.</span></td>
+              </tr>
+              <tr>
+                <th>App Inventory</th>
+                <td class="cell empty"></td>
+                <td class="cell filled"><span class="txt">Pull live from CMDB/ServiceNow/Backstage rather than a static spreadsheet.</span></td>
+                <td class="cell empty"></td><td class="cell empty"></td><td class="cell empty"></td>
+              </tr>
+              <tr>
+                <th>Test Tracker</th>
+                <td class="cell filled"><span class="txt">An MCP tool that can trigger a lightweight synthetic DR test (failover a non-prod replica) on schedule, giving ground-truth evidence instead of self-reported checkboxes.</span></td>
+                <td class="cell empty"></td><td class="cell empty"></td>
+                <td class="cell filled"><span class="txt">Poll the test-tracking tool on a cadence, flag DR tests overdue against a tiering-based SLA (Tier1 quarterly, Tier3 annual).</span></td>
+                <td class="cell empty"></td>
+              </tr>
+              <tr>
+                <th>Dependency Map</th>
+                <td class="cell filled"><span class="txt">An MCP tool that queries the CMDB/network graph/observability tool live and renders a fresh graph on demand instead of trusting a stale diagram.</span></td>
+                <td class="cell empty"></td><td class="cell empty"></td><td class="cell empty"></td><td class="cell empty"></td>
+              </tr>
+              <tr>
+                <th>Scheduling</th>
+                <td class="cell empty"></td><td class="cell empty"></td>
+                <td class="cell gap"><span class="txt">GAP — calendars do not belong in git — better solved by a calendar API connector feeding a scheduling MCP tool.</span></td>
+                <td class="cell empty"></td><td class="cell empty"></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout">
+          <span class="kicker">pattern detected</span>
+          <p><span class="badge badge-idea">idea</span><br>Human report-in is the universal fallback: telling the agent in chat becomes the ingestion path for any domain with no connector yet.</p>
+          <p><span class="badge badge-idea">idea</span><br>Build one thin universal-adapter MCP server with pluggable backends per domain, so each new data source is a config entry, not new code.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 2. DISNEY METHOD ============ -->
+    <section id="t2" class="panel" style="--accent:var(--c2)">
+      <div class="panel-head"><span class="panel-no">02</span><h2>Disney Method</h2><span class="panel-kind">technique · divergent</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">three rooms</span>Dreamer imagines without limits, Realist grounds it in what can actually ship, Critic stress-tests both.</p>
+        <div class="disney-grid">
+          <div class="disney-col dreamer">
+            <h3>Dreamer</h3>
+            <ul>
+              <li>The agent watches every system change org-wide and silently re-runs the whole dependency and impact model before anyone asks.</li>
+              <li>It drafts the DR test schedule for the year, negotiates slots via every app owner's calendar API, and just tells you when to show up.</li>
+              <li>It writes the audit report, the compliance evidence pack, and the board deck, and only asks you to sign off.</li>
+              <li>One daily voice/text briefing — what changed, what is now at risk, who to ping, the exact message to send them.</li>
+            </ul>
+          </div>
+          <div class="disney-col realist">
+            <h3>Realist</h3>
+            <ul>
+              <li>Start with read-only connectors (CMDB, ticketing, git, calendar) before ever writing back to a system of record.</li>
+              <li>Human approval gate before anything touches a runbook, RACI, or schedule a real incident would depend on.</li>
+              <li>Persist state in a git repo (memory-as-code) so every change to the DR program has a diff, an author, and a revert.</li>
+              <li>One MCP server per domain (BIA, CMDB, ticketing, calendar) behind a single orchestrating agent so connectors swap independently.</li>
+            </ul>
+          </div>
+          <div class="disney-col critic">
+            <h3>Critic</h3>
+            <ul>
+              <li>Nobody trusts an AI-derived dependency map until it is wrong once loudly — build confidence scoring and show-your-sources into every inferred link.</li>
+              <li>Auditors want a human-signed trail, not "the agent decided" — every automated action needs an attributable human approver.</li>
+              <li>A CMDB is often already stale, so the agent inherits garbage-in unless it cross-validates across at least two sources before flagging.</li>
+              <li>Over-automation risk — if the daily briefing becomes noise people stop reading it, so the agent must learn to shut up about the 90% that has not changed.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 3. FIVE WHYS ============ -->
+    <section id="t3" class="panel" style="--accent:var(--c3)">
+      <div class="panel-head"><span class="panel-no">03</span><h2>Five Whys</h2><span class="panel-kind">technique · root-cause</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">drill-down</span>Why are DR programs reactive? Five descents to the root.</p>
+        <div class="why-chain">
+          <div class="why-step"><span class="lbl">Why 1</span><p>DR programs are reactive because status only gets checked right before an audit or after an incident.</p></div>
+          <div class="why-step"><span class="lbl">Why 2</span><p>It is only checked then because compiling current state (BIA, tests, ownership) is manual and slow.</p></div>
+          <div class="why-step"><span class="lbl">Why 3</span><p>Compiling it is slow because the data lives in disconnected systems with no shared freshness signal.</p></div>
+          <div class="why-step"><span class="lbl">Why 4</span><p>There is no shared freshness signal because nothing owns staleness as a first-class concept — tools store data but not its expiry.</p></div>
+          <div class="why-step"><span class="lbl">Why 5</span><p>Nothing owns staleness because DR artifacts were designed as one-time deliverables, not living, continuously-revalidated state.</p></div>
+        </div>
+        <div class="root-cause">
+          <span class="lbl">root cause</span>
+          <p>DR is treated as a project, not a system with a heartbeat — the agent's core job is to give staleness a heartbeat per artifact type and tier.</p>
+        </div>
+        <p class="why-extra"><span class="badge badge-insight">insight</span><br>Compliance evidence-gathering hurts for the same root reason: it is reconstructed retroactively from memory and scattered emails instead of captured live.</p>
+      </div>
+    </section>
+
+    <!-- ============ 4. PROVOCATION ============ -->
+    <section id="t4" class="panel" style="--accent:var(--c4)">
+      <div class="panel-head"><span class="panel-no">04</span><h2>Provocation Technique</h2><span class="panel-kind">technique · divergent</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">deliberately absurd → mined principle</span>Say the impossible on purpose, then extract what's true underneath it.</p>
+        <div class="po-list">
+          <div class="po-item">
+            <div class="po"><span class="lbl">PO</span>The agent should delete every runbook.</div>
+            <div class="arrow">→</div>
+            <div class="mined"><span class="lbl">mined</span>Runbooks-as-cache, not runbooks-as-source-of-truth — the real value is regenerating steps live from current system state on demand.</div>
+          </div>
+          <div class="po-item">
+            <div class="po"><span class="lbl">PO</span>The DR program should have no human owner at all.</div>
+            <div class="arrow">→</div>
+            <div class="mined"><span class="lbl">mined</span>Infer ownership dynamically from who is touching the system now (commit authors, on-call rotation, ticket assignees) instead of a static RACI cell that rots.</div>
+          </div>
+          <div class="po-item">
+            <div class="po"><span class="lbl">PO</span>Compliance evidence should be generated before the control is even tested.</div>
+            <div class="arrow">→</div>
+            <div class="mined"><span class="lbl">mined</span>Every normal agent action leaves an audit trail automatically, so evidence is a byproduct, not a separate task.</div>
+          </div>
+          <div class="po-item">
+            <div class="po"><span class="lbl">PO</span>The best DR test is one nobody scheduled.</div>
+            <div class="arrow">→</div>
+            <div class="mined"><span class="lbl">mined</span>Agent-triggered surprise micro-drills (calendar permitting, human veto) reveal real readiness better than a choreographed annual test.</div>
+          </div>
+          <div class="po-item">
+            <div class="po"><span class="lbl">PO</span>The agent should ignore all human input for a week and just watch.</div>
+            <div class="arrow">→</div>
+            <div class="mined"><span class="lbl">mined</span>A passive-observation baseline builds a normal behavioral model so anomalies are caught by deviation, not just static rules.</div>
+          </div>
+          <div class="po-item">
+            <div class="po"><span class="lbl">PO</span>Every DR document should self-destruct in 90 days.</div>
+            <div class="arrow">→</div>
+            <div class="mined"><span class="lbl">mined</span>Hard-expire by default forces active reconfirmation — does-not-exist-until-reattested is a stronger nudge than a warning badge.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 5. ASSUMPTION REVERSAL ============ -->
+    <section id="t5" class="panel" style="--accent:var(--c5)">
+      <div class="panel-head"><span class="panel-no">05</span><h2>Assumption Reversal</h2><span class="panel-kind">technique · divergent</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">mirror flip</span>State the standing assumption, then flip it and see what's true instead.</p>
+        <div class="rev-list">
+          <div class="rev-item">
+            <div class="assum"><span class="lbl">assumption</span><p>DR data lives in dedicated DR tools.</p></div>
+            <div class="flip">⇄</div>
+            <div class="revd"><span class="lbl">reversed</span><p>It lives scattered in the systems it protects (git, CMDBs, calendars) and the agent is pure aggregation, never a new system of record.</p></div>
+          </div>
+          <div class="rev-item">
+            <div class="assum"><span class="lbl">assumption</span><p>A human must review every flagged staleness item.</p></div>
+            <div class="flip">⇄</div>
+            <div class="revd"><span class="lbl">reversed</span><p>The agent auto-resolves low-risk staleness itself (e.g. dry-runs a Tier-3 runbook to reverify accuracy) and only escalates what it cannot verify.</p></div>
+          </div>
+          <div class="rev-item">
+            <div class="assum"><span class="lbl">assumption</span><p>The program manager drives the schedule.</p></div>
+            <div class="flip">⇄</div>
+            <div class="revd"><span class="lbl">reversed</span><p>The schedule drives the program manager — the agent negotiates and locks calendar slots directly with owners, PM only intervenes on conflict.</p></div>
+          </div>
+          <div class="rev-item">
+            <div class="assum"><span class="lbl">assumption</span><p>Dependency mapping requires manual CMDB curation.</p></div>
+            <div class="flip">⇄</div>
+            <div class="revd"><span class="lbl">reversed</span><p>Maps are inferred continuously from network flow logs, deploy pipelines, and API call graphs — the CMDB becomes a confirmation layer, not the source.</p></div>
+          </div>
+          <div class="rev-item">
+            <div class="assum"><span class="lbl">assumption</span><p>Greenfield and brownfield need different tools.</p></div>
+            <div class="flip">⇄</div>
+            <div class="revd"><span class="lbl">reversed</span><p>Brownfield is greenfield with pre-loaded, lower-confidence memory — the adoption audit pass IS the greenfield bootstrap, just seeded with existing data to validate.</p></div>
+          </div>
+          <div class="rev-item">
+            <div class="assum"><span class="lbl">assumption</span><p>More data sources is always better.</p></div>
+            <div class="flip">⇄</div>
+            <div class="revd"><span class="lbl">reversed</span><p>Fewer, higher-trust sources with strong provenance beat many low-trust feeds — rank and red-line sources by trust score, not breadth.</p></div>
+          </div>
+          <div class="rev-item">
+            <div class="assum"><span class="lbl">assumption</span><p>The agent always notifies the person.</p></div>
+            <div class="flip">⇄</div>
+            <div class="revd"><span class="lbl">reversed</span><p>Sometimes the agent should notify the system (auto-file a ticket, auto-update a status field) and only loop in a human on exception.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 6. OBSERVER EFFECT ============ -->
+    <section id="t6" class="panel" style="--accent:var(--c6)">
+      <div class="panel-head"><span class="panel-no">06</span><h2>Observer Effect</h2><span class="panel-kind">technique · systems</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">the watching changes the watched</span>Installing the agent changes the behavior of the system it observes.</p>
+        <div class="obs-grid">
+          <div class="obs-item"><div class="obs-loop"></div><p>If the agent scores app owners on responsiveness, owners may game the metric with fast empty acknowledgements rather than genuinely engaging.</p></div>
+          <div class="obs-item"><div class="obs-loop"></div><p>Once dependency mapping is visible and shared, teams may deliberately hide or under-document risky dependencies to avoid being flagged as a blocker.</p></div>
+          <div class="obs-item"><div class="obs-loop"></div><p>Once a staleness score exists and is watched, teams optimize the score (touch the doc to reset a timestamp) rather than the underlying accuracy — must detect refreshed-but-not-reviewed via content diff, not just mtime.</p></div>
+          <div class="obs-item"><div class="obs-loop"></div><p>Simply installing a DR agent that watches everything may itself raise perceived audit pressure and change how honestly people log incidents — needs transparent, non-punitive framing or it corrupts its own data.</p></div>
+          <div class="obs-item"><div class="obs-loop"></div><p>The daily catch-up ritual itself may narrow DR maturity to whatever the agent's brief measures — scope creep toward the instrumentable, not the important.</p></div>
+          <div class="obs-item"><div class="obs-loop"></div><p>If leadership sees a shiny DR maturity score rise, budget/attention for DR might paradoxically decrease because "it is handled now" — the dashboard's success could starve its own resourcing.</p></div>
+          <div class="obs-item"><div class="obs-loop"></div><p>Publishing a dependency graph might reveal politically inconvenient ownership gaps (two teams each think the other owns something) — needs a diplomatic communication layer, not a raw graph dump.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 7. SIX THINKING HATS ============ -->
+    <section id="t7" class="panel" style="--accent:var(--c7)">
+      <div class="panel-head"><span class="panel-no">07</span><h2>Six Thinking Hats</h2><span class="panel-kind">technique · parallel lenses</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">six lenses, one topic</span>Same question, six deliberately different modes of thought.</p>
+        <div class="hat-grid">
+          <div class="hat-item"><span class="hat-chip hat-white">White · facts</span><p>Today's real inputs are BIA docs, app inventory/tiering, runbooks, playbooks, RACI, test schedules — mostly manual, mostly stale, mostly scattered.</p></div>
+          <div class="hat-item"><span class="hat-chip hat-red">Red · feelings</span><p>Want to feel lazy — covered, not chasing people — and confident nothing is missed.</p></div>
+          <div class="hat-item"><span class="hat-chip hat-yellow">Yellow · benefits</span><p>Proactive flagging could catch a Tier-1 app with no reviewed BIA in 18 months before an auditor or an actual outage does.</p></div>
+          <div class="hat-item"><span class="hat-chip hat-black">Black · risks</span><p>False confidence — if the agent's coverage has blind spots, you might trust it more than the data deserves.</p></div>
+          <div class="hat-item"><span class="hat-chip hat-green">Green · new idea</span><p>A confidence coverage map showing which domains/tiers are agent-verified vs still manual/unknown, so blind spots are visible, not hidden.</p></div>
+          <div class="hat-item"><span class="hat-chip hat-blue">Blue · process</span><p>Run the program at agent-native cadence — daily micro-check, weekly digest, monthly deep audit, quarterly leadership report — different loop speeds for different stakeholders.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 8. KILL THE CROWN JEWEL ============ -->
+    <section id="t8" class="panel" style="--accent:var(--c8)">
+      <div class="panel-head"><span class="panel-no">08</span><h2>Kill the Crown Jewel</h2><span class="panel-kind">technique · destructive</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">delete the favorite, see what regrows</span>The most-loved feature is removed on purpose to find what actually matters underneath it.</p>
+        <div class="jewel"><span class="item">the daily notification / catch-up</span></div>
+        <div class="regrowth">
+          <span class="lbl">what grew back</span>
+          <ul>
+            <li>Without a daily push, the agent becomes pull-based: an always-current state-of-the-program dashboard/chat command, plus event-triggered alerts only for genuinely urgent risk.</li>
+            <li>The real value surfaces as the memory and dependency graph itself — a living queryable model any tool (chat, dashboard, ticketing bot) can read from; the notification was just one view on that model.</li>
+            <li>Design implication: build the state model and connectors first as the core product; daily catch-up becomes just the default delivery channel, swappable for Slack digest, email, or on-demand voice briefing.</li>
+            <li>Without the notification, laziness has to be re-earned through radical query-ability — a natural language chat interface ("what is stale", "what is due", "what needs me") becomes the crown-jewel replacement.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 9. BLAST RADIUS REWIND ============ -->
+    <section id="t9" class="panel" style="--accent:var(--c9)">
+      <div class="panel-head"><span class="panel-no">09</span><h2>Blast Radius Rewind</h2><span class="panel-kind">technique · invented, brand new</span></div>
+      <div class="panel-body">
+        <div class="radar-wrap">
+          <div class="radar" aria-hidden="true"></div>
+          <p class="radar-def">Take a real past incident or change, rewind it in a sandbox against the agent's current dependency model, check whether the agent would have flagged the risk before it happened, and mine what data or connection was missing.</p>
+        </div>
+        <ul class="find-list">
+          <li>Feed the agent 3 anonymized past incidents/changes as unit tests for the dependency model — whatever it would not have caught IS the connector priority list.</li>
+          <li>Turn every real incident retro into a permanent regression test for the agent's model, so its accuracy is provably improving over time, not just asserted.</li>
+          <li>Score the agent's model retroactively against every incident in the last 3 years as a standing "would-have-caught-it" scoreboard, published alongside its live claims for credibility.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 10. OWNERLESS OBJECT HUNT ============ -->
+    <section id="t10" class="panel" style="--accent:var(--c10)">
+      <div class="panel-head"><span class="panel-no">10</span><h2>Ownerless Object Hunt</h2><span class="panel-kind">technique · invented, brand new</span></div>
+      <div class="panel-body">
+        <div class="orphan-wrap">
+          <div class="orphan-tag">?</div>
+          <p class="orphan-def">For every artifact/system the agent touches, systematically ask: if this had no listed owner today, who would the agent guess, and how confident is it? Surfaces orphaned ownership before it becomes a crisis.</p>
+        </div>
+        <ul class="orphan-list">
+          <li>The agent maintains a live orphan-risk list — systems where RACI says one thing but recent activity (commits, tickets, on-call) says another, or nothing at all.</li>
+          <li>Confidence-scored owner inference lets the agent auto-draft (never auto-send) the "are-you-still-the-owner-of-X" message for a human to approve and fire.</li>
+          <li>Cross-reference org-chart/HRIS changes (leavers, team moves) against RACI nightly — a departed owner becomes a guaranteed orphan caught the day it happens, not the day someone needs them.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 11. FRESHNESS LEDGER ============ -->
+    <section id="t11" class="panel" style="--accent:var(--c11)">
+      <div class="panel-head"><span class="panel-no">11</span><h2>Freshness Ledger</h2><span class="panel-kind">technique · invented in the spirit of Structured</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">balance sheet for staleness</span>For every artifact type, define columns — last verified, verification method, expiry rule, tier-based SLA, escalation owner — and fill the ledger like a balance sheet, hunting for empty or undefined cells the way Solution Matrix hunts gaps.</p>
+        <div class="scrollx">
+          <table class="ledger">
+            <thead><tr><th>Artifact type</th><th>Last verified</th><th>Verification method</th><th>Expiry rule</th><th>Escalation owner</th></tr></thead>
+            <tbody>
+              <tr><td class="filled">BIA</td><td class="unspecified">—</td><td class="unspecified">—</td><td class="filled">12mo (Tier 1) / 24mo (Tier 2)</td><td class="unspecified">—</td></tr>
+              <tr><td class="filled">Runbook</td><td class="unspecified">—</td><td class="unspecified">—</td><td class="filled">Revalidate after any dependency change, plus 12mo max</td><td class="unspecified">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <span class="kicker">idea</span>
+          <p>The ledger itself becomes the compliance artifact — instead of writing a report, export the ledger; the audit is a spreadsheet the agent already keeps current.</p>
+          <span class="kicker">idea</span>
+          <p>Visualize the ledger as a heatmap by tier × domain so gaps and overdue cells are the first thing you see, not a stat buried in a table.</p>
+          <div class="heat-demo">
+            <div class="heat-grid" aria-hidden="true">
+              <span style="background:var(--ok-green)"></span><span style="background:var(--ok-green)"></span><span style="background:var(--c3)"></span><span style="background:var(--gap-red)"></span><span style="background:var(--ok-green)"></span>
+              <span style="background:var(--c3)"></span><span style="background:var(--ok-green)"></span><span style="background:var(--ok-green)"></span><span style="background:var(--c3)"></span><span style="background:var(--gap-red)"></span>
+              <span style="background:var(--gap-red)"></span><span style="background:var(--c3)"></span><span style="background:var(--ok-green)"></span><span style="background:var(--ok-green)"></span><span style="background:var(--c3)"></span>
+            </div>
+            <span class="heat-cap">illustrative shape only — not session data</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 12. ECOSYSTEM THINKING ============ -->
+    <section id="t12" class="panel" style="--accent:var(--c12)">
+      <div class="panel-head"><span class="panel-no">12</span><h2>Ecosystem Thinking</h2><span class="panel-kind">technique · biomimetic, chosen for the goal</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">the DR program as a living ecosystem</span>Map the program onto biological roles to find forces a purely mechanical model misses.</p>
+        <div class="eco-web">
+          <div class="eco-grid">
+            <div class="eco-card"><span class="role">predators / competition</span><p>Incident response teams and the DR program compete for the same on-call attention — the agent should coordinate timing so DR drills never collide with live incident load.</p></div>
+            <div class="eco-card"><span class="role">symbiosis</span><p>The agent should partner with existing tools (ticketing, CMDB, calendar) rather than replace them — connective tissue, not a new organ competing for the same niche.</p></div>
+            <div class="eco-card"><span class="role">decomposers</span><p>Stale runbooks and BIAs are the dead matter — the agent's staleness-flagging role IS the decomposer function, breaking outdated artifacts back into needs-regeneration so accurate info recirculates.</p></div>
+            <div class="eco-card"><span class="role">keystone species</span><p>App/service tiering is the keystone — get tiering wrong and the whole priority signal collapses, so tiering itself should be a high-value, frequently-revalidated artifact, not a one-time classification.</p></div>
+            <div class="eco-card"><span class="role">migration / gaps</span><p>Org restructures and team moves create sudden ownership migration gaps — watch org-chart/team-topology changes as a leading indicator RACI is about to go stale, do not wait for the RACI doc itself to be flagged.</p></div>
+            <div class="eco-card"><span class="role">invasive species</span><p>Shadow-IT systems (unsanctioned SaaS/tools) are untracked, undocumented, and usually the actual cause of an unmapped dependency — hunt them via expense/SSO logs.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 13. ROLE PLAYING ============ -->
+    <section id="t13" class="panel" style="--accent:var(--c13)">
+      <div class="panel-head"><span class="panel-no">13</span><h2>Role Playing</h2><span class="panel-kind">technique · collaborative, chosen for the goal</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">six stakeholders, six demands</span>Speak the requirement in each stakeholder's own voice.</p>
+        <div class="voice-grid">
+          <div class="voice"><span class="role">app owner (technical)</span><p>I do not want another dashboard to check — ping me in Slack with exactly what changed and what you need from me, one line, with a deadline.</p></div>
+          <div class="voice"><span class="role">business stakeholder</span><p>I care about risk in business terms — revenue at risk or customers impacted, not "RTO breached by 4 hours" — translate technical staleness into business exposure.</p></div>
+          <div class="voice"><span class="role">compliance / audit</span><p>Show me evidence, not intentions — a timestamped, immutable trail of who reviewed what and when, exportable on demand, or it does not count.</p></div>
+          <div class="voice"><span class="role">DR program owner (Olu)</span><p>Tell me only what needs a decision from me today, ranked by risk, with the action already drafted (message, ticket, escalation) so all I do is approve.</p></div>
+          <div class="voice"><span class="role">skeptical CISO</span><p>Prove the AI is not hallucinating a dependency — every automated claim needs a clickable source, or I will not sign off on using this for compliance evidence.</p></div>
+          <div class="voice"><span class="role">new hire</span><p>I inherited this DR program with zero context — I want the agent to onboard ME: here is the current state, here is what is overdue, here is who is who.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ SYNTHESIS ============ -->
+    <section id="synthesis" class="panel synthesis" style="--accent:var(--ok-green)">
+      <div class="panel-head"><span class="panel-no">⬤</span><h2>Synthesis I — Signal Convergence</h2><span class="panel-kind">six lines of evidence, one direction</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">six techniques, run independently, kept landing on the same six truths</span></p>
+
+        <div class="pulse small" aria-hidden="true">
+          <div class="pulse-track">
+            <svg viewBox="0 0 400 40" preserveAspectRatio="none"><polyline points="0,20 30,20 45,20 55,2 65,38 75,20 90,20 120,20 135,20 145,2 155,38 165,20 180,20 210,20 225,20 235,2 245,38 255,20 270,20 300,20 315,20 325,2 335,38 345,20 360,20" fill="none" stroke="var(--ok-green)" stroke-width="2"/></svg>
+            <svg viewBox="0 0 400 40" preserveAspectRatio="none"><polyline points="0,20 30,20 45,20 55,2 65,38 75,20 90,20 120,20 135,20 145,2 155,38 165,20 180,20 210,20 225,20 235,2 245,38 255,20 270,20 300,20 315,20 325,2 335,38 345,20 360,20" fill="none" stroke="var(--ok-green)" stroke-width="2"/></svg>
+          </div>
+        </div>
+
+        <div class="conv-grid">
+          <div class="conv strongest">
+            <span class="n">Convergence 1 · strongest signal</span>
+            <p>Freshness Ledger (invented) + staleness-heartbeat root cause (Five Whys) + hard-expire-by-default (Provocation) are the same discovery from three angles — staleness must be a first-class, structured, expiring data model, not a vibe.</p>
+          </div>
+          <div class="conv">
+            <span class="n">Convergence 2 · architecture</span>
+            <p>Runbooks-as-cache (Provocation) + memory-as-code in git (Disney Realist) + ledger-as-compliance-artifact (Freshness Ledger) sketch the actual architecture — git-backed memory, live-regenerated artifacts, ledger doubling as the audit trail.</p>
+          </div>
+          <div class="conv">
+            <span class="n">Convergence 3 · ownership</span>
+            <p>RACI × MCP (Solution Matrix) + Ownerless Object Hunt (invented) + org-migration-gaps (Ecosystem) + three separate Role Playing voices all point at ownership as the single most fragile, highest-leverage data domain — more urgent to solve than BIA or runbooks because everything else depends on knowing who to ping right now.</p>
+          </div>
+          <div class="conv">
+            <span class="n">Convergence 4 · product shape</span>
+            <p>Kill the Crown Jewel (state model as core product, notification as a swappable view) + Blast Radius Rewind (retroactive would-have-caught-it scoreboard) converge on the product being a trust-building live model, not a notification bot — the daily catch-up is the friendliest UI on top of a verifiable state machine.</p>
+          </div>
+          <div class="conv">
+            <span class="n">Convergence 5 · trust as a parameter</span>
+            <p>The Observer Effect risk cluster (gamed staleness scores, hidden dependencies, notification fatigue, budget starving its own success) plus the Role Playing demands for non-punitive evidence-based framing means trust and psychological safety must be a first-class design parameter, not an afterthought.</p>
+          </div>
+          <div class="conv">
+            <span class="n">Convergence 6 · honest scope</span>
+            <p>Confidence coverage map (Six Hats) + the BIA-Git and Scheduling-Git gaps (Solution Matrix) + read-only-first (Disney Realist) define a natural, honest v1 scope: an agent that is upfront about what it can and cannot see yet.</p>
+          </div>
+        </div>
+
+        <div class="core">
+          <span class="kicker">proposed v1 direction</span>
+          <h3>Where all six signals converge</h3>
+          <ul>
+            <li>Git-backed memory + Freshness Ledger data model + read-only connectors (calendar, ticketing, git, CMDB) + confidence/coverage map.</li>
+            <li>Signature UI is chat-queryable state; the daily digest is just one view on it.</li>
+            <li>Ownership-fragility (RACI-via-activity-inference + Ownerless Object Hunt) is the wedge feature.</li>
+            <li>Trust layer — show-your-sources, non-punitive framing, human-approval gate on writes — is required before compliance/CISO stakeholders will accept it.</li>
+            <li>Blast Radius Rewind and proactive micro-drills come later, once trust is established.</li>
+          </ul>
+          <span class="pending">pending Olu's confirmation</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ ROUND 2 DIVIDER ============ -->
+    <div class="round2-divider"><span class="r2-label">◆ round 2 begins ◆</span></div>
+    <p class="round2-note">The user loved the keepsake and asked to keep going: 8 more techniques, drawn genuinely at random from unused categories (cultural, creative, absurdist, wild, theatrical) — coach continues solo in "Ideate for me" mode.</p>
+
+    <!-- ============ 14. TRICKSTER'S GAMBIT ============ -->
+    <section id="t14" class="panel" style="--accent:var(--c14)">
+      <div class="panel-head"><span class="panel-no">14</span><h2>Trickster's Gambit</h2><span class="panel-kind">technique · cultural, random draw</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">sleight of hand</span>Take a convention everyone treats as sacred, cheat it in plain sight, and see what the trick reveals.</p>
+        <div class="trick-grid">
+          <div class="trick-card"><span class="ribbon">sleight of hand</span>
+            <div class="rule"><span class="lbl">the rule</span>The once-a-year point-in-time audit.</div>
+            <div class="cheat"><span class="lbl">the cheat</span>Cheat it entirely: no annual audit report, keep a live always-audited state auditors can query whenever they want — refuse the once-a-year performance.</div>
+          </div>
+          <div class="trick-card"><span class="ribbon">sleight of hand</span>
+            <div class="rule"><span class="lbl">the rule</span>Only the PM talks to the board.</div>
+            <div class="cheat"><span class="lbl">the cheat</span>The agent drafts the board update directly from live evidence — the human job becomes editing tone, not gathering facts.</div>
+          </div>
+          <div class="trick-card"><span class="ribbon">sleight of hand</span>
+            <div class="rule"><span class="lbl">the rule</span>Ask permission before testing the runbook.</div>
+            <div class="cheat"><span class="lbl">the cheat</span>Invert it: the agent quietly dry-runs runbook steps in a sandbox on a schedule and reports the surprise result instead of waiting to be asked.</div>
+          </div>
+          <div class="trick-card"><span class="ribbon">sleight of hand</span>
+            <div class="rule"><span class="lbl">the rule</span>RACI needs a single Accountable owner (a name).</div>
+            <div class="cheat"><span class="lbl">the cheat</span>Cheat it: assign accountability to a live role query ("whoever is on-call for payments this week") that resolves dynamically instead of a name that always goes stale.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 15. TIME SHIFTING ============ -->
+    <section id="t15" class="panel" style="--accent:var(--c15)">
+      <div class="panel-head"><span class="panel-no">15</span><h2>Time Shifting</h2><span class="panel-kind">technique · creative, random draw</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">same harvest, different centuries</span>Solve the same problem as a 1900s artisan, then again as a 2150 colonist.</p>
+        <div class="time-track">
+          <div class="era era-past">
+            <span class="era-lbl">1900s · artisan harvest</span>
+            <p>A meticulous ledger-keeper apprentice visits every workshop on a fixed rota, one master book, flags anything unre-inspected within its season — the master-ledger-as-single-source-of-truth and fixed visiting cadence are timeless ideas worth keeping even in the AI version.</p>
+          </div>
+          <div class="era era-future">
+            <span class="era-lbl">2150 · colonist harvest</span>
+            <ul>
+              <li>Infrastructure self-reports its own health into a shared mesh, humans alerted only when the mesh cannot resolve an ambiguity — push toward systems that self-attest via telemetry/webhooks rather than being polled.</li>
+              <li>Colonies fail together or not at all — treat every dependency as an existential coupling, not a technical footnote; dependency mapping is survival infrastructure, not a nice-to-have.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 16. INFOMERCIAL AT 3AM ============ -->
+    <section id="t16" class="panel" style="--accent:var(--c16)">
+      <div class="panel-head"><span class="panel-no">16</span><h2>Infomercial at 3AM</h2><span class="panel-kind">technique · absurdist, random draw</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">as seen on late-night cable</span>Pitch the idea like a 3AM infomercial, then mine the gimmick for a real feature.</p>
+        <div class="info-card">
+          <span class="starburst">the pitch!</span>
+          <p><b>Tired of chasing app owners?</b> It pings them for you, drafts the excuse email for them, only bothers you when they ignore it twice, and notices when your BIA is older than your last iPhone upgrade.</p>
+        </div>
+        <div class="info-card">
+          <span class="starburst">but wait, there's more!</span>
+          <p>It does not just find stale runbooks — it gently roasts them in the daily digest so people are embarrassed into fixing them. Opt-in only.</p>
+        </div>
+        <ul class="info-list">
+          <li><span class="badge badge-insight">mined</span><br>Gentle social pressure via an opt-in leaderboard of freshest vs. stalest domains per team could be a cheap, effective nudge — as long as it stays non-punitive per the earlier Observer Effect risk.</li>
+          <li><span class="badge badge-insight">mined</span><br>Default-accepted, easily-declinable calendar holds for DR test slots — invert the usual please-respond friction into an invite you almost did not notice accepting.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ 17. ELEMENTAL FORCES ============ -->
+    <section id="t17" class="panel" style="--accent:var(--c17)">
+      <div class="panel-head"><span class="panel-no">17</span><h2>Elemental Forces</h2><span class="panel-kind">technique · wild, random draw</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">four forces, four lenses</span>Fire, water, earth, air — what does each classical element demand of the design?</p>
+        <div class="elem-grid">
+          <div class="elem-card elem-fire"><div class="icon icon-flame" aria-hidden="true"></div><span class="name">fire</span><p>Burns away any artifact that cannot prove it has been touched in N months — force automatic archival/hiding of unverified content so only trusted, live data is shown by default.</p></div>
+          <div class="elem-card elem-water"><div class="icon icon-drop" aria-hidden="true"></div><span class="name">water</span><p>Reveals real dependency paths by following where data/traffic actually flows, like water finds the crack — reinforces inferring dependencies from actual flow, not declared diagrams.</p></div>
+          <div class="elem-card elem-earth"><div class="icon icon-mtn" aria-hidden="true"></div><span class="name">earth</span><p>The tiering model is the foundation — the slowest-changing, most load-bearing layer; schedules and notifications sit on top and should not be allowed to silently drift from it.</p></div>
+          <div class="elem-card elem-air"><div class="icon icon-wind" aria-hidden="true"><span></span><span></span><span></span></div><span class="name">air</span><p>The notification/comms layer is invisible until needed but carries the who-to-engage signal — if this layer is polluted with noise, nothing else works no matter how good the rest is.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 18. ANCESTOR COUNCIL ============ -->
+    <section id="t18" class="panel" style="--accent:var(--c18)">
+      <div class="panel-head"><span class="panel-no">18</span><h2>Ancestor Council</h2><span class="panel-kind">technique · cultural, random draw</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">three elders, three eras of hard-won judgment</span>Summon practitioners from different eras of computing and ask each for a verdict.</p>
+        <div class="council-grid">
+          <div class="plaque"><span class="elder">COBOL mainframe ops elder</span><p>Document everything on paper as backup, never trust a system that cannot survive its own outage — the agent's own memory must be recoverable without the agent (git and plain files, not a proprietary DB); the DR tool must itself be disaster-recoverable.</p></div>
+          <div class="plaque"><span class="elder">Silicon Valley startup elder</span><p>Ship fast, iterate, do not wait for perfect data — launch read-only and useful on partial/messy data immediately rather than waiting for a clean, fully-integrated model.</p></div>
+          <div class="plaque"><span class="elder">Compliance / audit elder</span><p>If it is not written down and signed, it did not happen — no automated action counts as done without a durable, attributable, timestamped record, non-negotiable.</p></div>
+        </div>
+        <div class="reconcile">
+          <span class="kicker">reconciliation</span>
+          <p>Fast-to-start, provably durable, and self-recoverable are not actually in tension — launch narrow and read-only fast, but log everything to durable, human-readable, git-backed records from day one.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 19. CONCEPT BLENDING ============ -->
+    <section id="t19" class="panel" style="--accent:var(--c19)">
+      <div class="panel-head"><span class="panel-no">19</span><h2>Concept Blending</h2><span class="panel-kind">technique · creative, random draw</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">two unrelated concepts, one forced hybrid</span>Smash two domains together on purpose and name whatever survives the collision.</p>
+        <div class="blend-list">
+          <div class="blend-item">
+            <div class="blend-inputs"><span class="blend-chip">immune system</span><span class="blend-plus">+</span><span class="blend-chip">audit trail</span></div>
+            <div class="blend-out"><span class="blend-pill">Antibody Ledger</span></div>
+            <p class="desc">The agent remembers every past incident it has seen and auto-produces antibodies (updated checks/tests), with the ledger as durable memory of what it is now immune to.</p>
+          </div>
+          <div class="blend-item">
+            <div class="blend-inputs"><span class="blend-chip">git version control</span><span class="blend-plus">+</span><span class="blend-chip">RACI</span></div>
+            <div class="blend-out"><span class="blend-pill">OwnerGraph</span></div>
+            <p class="desc">Ownership is a versioned graph with commit history, so you can see exactly when and why accountability moved from one person to another, same as code.</p>
+          </div>
+          <div class="blend-item">
+            <div class="blend-inputs"><span class="blend-chip">weather forecast</span><span class="blend-plus">+</span><span class="blend-chip">compliance status</span></div>
+            <div class="blend-out"><span class="blend-pill">Risk Forecast</span></div>
+            <p class="desc">Instead of a binary pass/fail, give a probabilistic forecast (70% chance this control is found deficient at next audit based on staleness trend) — turns compliance from a snapshot into a leading indicator.</p>
+          </div>
+          <div class="blend-item">
+            <div class="blend-inputs"><span class="blend-chip">flight recorder</span><span class="blend-plus">+</span><span class="blend-chip">daily briefing</span></div>
+            <div class="blend-out"><span class="blend-pill">Black Box Briefing</span></div>
+            <p class="desc">Every daily briefing doubles as an immutable flight-recorder entry, so you can replay exactly what the agent knew and said on any given day — powerful compliance and trust evidence.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 20. DEVIL'S ADVOCATE COURTROOM ============ -->
+    <section id="t20" class="panel" style="--accent:var(--c20)">
+      <div class="panel-head"><span class="panel-no">20</span><h2>Devil's Advocate Courtroom</h2><span class="panel-kind">technique · theatrical, random draw</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">prosecution vs. defense</span>Put the whole concept on trial — argue against it as hard as for it, then render a verdict.</p>
+        <div class="court-grid">
+          <div class="court-col prosecution">
+            <h3>Prosecution</h3>
+            <ul>
+              <li>The agent creates a single point of failure — if it is wrong or down, the DR program is blind, ironic for a disaster-recovery tool.</li>
+              <li>It will produce false confidence — people stop doing real reviews because "the agent has got it."</li>
+            </ul>
+          </div>
+          <div class="court-col defense">
+            <h3>Defense</h3>
+            <ul>
+              <li>It is additive not a replacement — every connector is read-only-first and the underlying systems of record still exist; the agent going down just means you are back to today's manual baseline, not worse off.</li>
+              <li>The confidence/coverage map explicitly shows agent-verified vs. unknown, and the agent escalates uncertainty rather than papering over it — the antidote to false confidence is designed in, not bolted on.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="verdict-banner">
+          <span class="kicker">verdict</span>
+          <p>Guilty of introducing a new dependency, but net risk-reducing IF it is read-only and gracefully degrades to today's baseline when down, AND never hides its own uncertainty — both should be hard, non-negotiable design constraints, not aspirations.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 21. DRUNK HISTORY RETELLING ============ -->
+    <section id="t21" class="panel" style="--accent:var(--c21)">
+      <div class="panel-head"><span class="panel-no">21</span><h2>Drunk History Retelling</h2><span class="panel-kind">technique · wild, random draw</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">tell it sloppy, keep it true</span>Retell the whole problem in a slurred, over-familiar voice and see what blurts out.</p>
+        <div class="drunk-wrap">
+          <div class="drunk-card"><span class="tag">raw retelling</span><p>Nobody knows who owns anything, the spreadsheet is a lie, and everyone finds out the DR plan is broken during the actual disaster — so build a robot that watches everything all the time and tells you exactly who to yell at.</p></div>
+          <div class="drunk-card"><span class="tag">raw retelling, continued</span><p>And it does not wait for the yearly audit like a DR performance review — it is always checking, like a smoke detector, not like a fire inspector who shows up once a year with a clipboard.</p></div>
+        </div>
+
+        <div class="tagline-banner">
+          <div class="tagline-row">
+            <div class="tagline-side smoke"><div class="smoke-icon" aria-hidden="true"></div><span class="label">SMOKE DETECTOR</span></div>
+            <span class="tagline-vs">not</span>
+            <div class="tagline-side fire"><div class="fire-icon" aria-hidden="true"></div><span class="label">fire inspector</span></div>
+          </div>
+          <p class="tagline-sub">mined tagline — continuous, ambient, low-ceremony detection vs. scheduled, high-ceremony inspection. Strongest candidate for the sharpest positioning line of the whole concept.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ SYNTHESIS II ============ -->
+    <section id="synthesis2" class="panel synthesis synthesis2" style="--accent:var(--c19)">
+      <div class="panel-head"><span class="panel-no">⬤⬤</span><h2>Synthesis II — The Second Heartbeat</h2><span class="panel-kind">round 2 coda, building on Synthesis I</span></div>
+      <div class="panel-body">
+        <p class="panel-sub"><span class="kicker">eight more techniques later, the same convergence sharpens into names and a tagline</span></p>
+
+        <div class="pulse small" aria-hidden="true">
+          <div class="pulse-track">
+            <svg viewBox="0 0 400 40" preserveAspectRatio="none"><polyline points="0,20 20,20 30,20 38,8 44,32 50,20 58,20 78,20 88,20 96,8 102,32 108,20 116,20 136,20 146,20 154,8 160,32 166,20 174,20 194,20 204,20 212,8 218,32 224,20 232,20 252,20 262,20 270,8 276,32 282,20 290,20 310,20 320,20 328,8 334,32 340,20 348,20 368,20 378,20 386,8 392,32 398,20 400,20" fill="none" stroke="var(--c19)" stroke-width="2"/></svg>
+            <svg viewBox="0 0 400 40" preserveAspectRatio="none"><polyline points="0,20 20,20 30,20 38,8 44,32 50,20 58,20 78,20 88,20 96,8 102,32 108,20 116,20 136,20 146,20 154,8 160,32 166,20 174,20 194,20 204,20 212,8 218,32 224,20 232,20 252,20 262,20 270,8 276,32 282,20 290,20 310,20 320,20 328,8 334,32 340,20 348,20 368,20 378,20 386,8 392,32 398,20 400,20" fill="none" stroke="var(--c19)" stroke-width="2"/></svg>
+          </div>
+        </div>
+
+        <p class="syn2-lead">Four named hybrid concepts emerged (Concept Blending) that all operationalize the same round-1 convergence — treat every automated action as durable, replayable evidence:</p>
+        <div class="hybrid-row">
+          <span class="blend-pill">Antibody Ledger</span>
+          <span class="blend-pill">OwnerGraph</span>
+          <span class="blend-pill">Risk Forecast</span>
+          <span class="blend-pill">Black Box Briefing</span>
+        </div>
+
+        <div class="core" style="margin-bottom:22px;">
+          <span class="kicker">positioning line</span>
+          <h3>Smoke detector, not fire inspector</h3>
+          <p style="margin:0;font-size:.9rem;color:var(--fg-dim);">Captures the whole product's positioning in one line (Drunk History Retelling): continuous ambient detection instead of scheduled, high-ceremony inspection.</p>
+        </div>
+
+        <p class="syn2-lead">The Ancestor Council and the Devil's Advocate Courtroom verdict converge, independently, on the same four non-negotiables:</p>
+        <ul class="nonneg-list">
+          <li>Read-only-first — write access is earned, never assumed.</li>
+          <li>Graceful degradation — if the agent is wrong or down, you are back to today's manual baseline, never worse off.</li>
+          <li>Self-recoverable memory — durable, human-readable, git-backed records; the DR tool must itself be disaster-recoverable.</li>
+          <li>Never hide uncertainty — every automated claim is sourced and confidence-scored, escalated rather than papered over.</li>
+        </ul>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    &gt; session mined out via 21 techniques across two rounds (~115 ideas total); two syntheses recorded; smoke detector, not fire inspector.<span class="cursor"></span>
+  </footer>
+
+</div>
