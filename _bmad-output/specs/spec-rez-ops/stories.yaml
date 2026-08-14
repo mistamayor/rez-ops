@@ -1,0 +1,100 @@
+- id: "1"
+  title: Shared schema + ledger-core foundation
+  description: >-
+    Establish the shared RawFact/LedgerRecord schema module and ledger-core's
+    append-only event log with materialized projection (SPEC CAP-1). No real
+    connector yet — proven against synthetic facts.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Implements AD-3 (append-only log + projection) and AD-4/AD-9 (shared
+    schema, RawFact vs LedgerRecord split). No real connector needed yet —
+    exercise against synthetic RawFacts.
+- id: "2"
+  title: "First connector: git"
+  description: >-
+    Build the git connector as the first Sensor, proving the read-only
+    fetch-and-normalize pattern into RawFact (SPEC CAP-2, partial).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implements AD-1/AD-2 (Sensor pattern, domain-prefixed tool naming, e.g.
+    git_list_items). Establishes the connector pattern Story 5 repeats.
+- id: "3"
+  title: Confidence and coverage computation
+  description: >-
+    Ledger-core computes confidence (agent-verified/manual/unknown) and a
+    coverage map from ingested RawFacts (SPEC CAP-3).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implements AD-5 (ledger-core-only confidence/coverage computation) using
+    Story 2's git connector as the first real data source.
+- id: "4"
+  title: Chat-queryable live state
+  description: >-
+    Expose ledger-core's current state through MCP tools a runtime can query
+    in natural language — what's stale, what's due, what needs attention
+    (SPEC CAP-4).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Runtime-facing MCP query surface per the paradigm's Voice layer (AD-1) —
+    read-only presentation of ledger-core state, no domain logic in the
+    runtime.
+- id: "5"
+  title: "Remaining connectors: calendar, ticketing, CMDB"
+  description: >-
+    Extend the connector pattern proven in Story 2 to the remaining three
+    domains (SPEC CAP-2 completion).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Repeat Story 2's connector pattern for the three remaining domains
+    (AD-2 domain-prefixed tool naming per connector).
+- id: "6"
+  title: Ownership inference and arbitration
+  description: >-
+    Implement the per-field ownership map and orphan-risk escalation across
+    the now-multiple connectors reporting ownership-bearing fields (SPEC
+    CAP-5) — the brief's wedge feature.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Implements AD-10: per-field ownership map, conflicting RawFacts logged
+    not overwritten, absence of any signal escalates to confidence=unknown
+    plus the orphan-risk list. Needs at least two connectors reporting an
+    overlapping ownership-bearing field (e.g. escalation_owner) to exercise
+    arbitration for real.
+- id: "7"
+  title: Draft-not-send outbound content
+  description: >-
+    Add ledger-core's dedicated write tool and git-tracked drafts queue for
+    agent-authored outbound content, with no auto-send path (SPEC CAP-6).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implements AD-6: drafts are created only via ledger-core's write tool,
+    never a direct filesystem write from any other component.
+- id: "8"
+  title: Periodic briefing
+  description: >-
+    Generate a ranked briefing from the same live state Story 4's queries
+    return, with a swappable delivery view (SPEC CAP-7).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Briefing content must match what Story 4's live query returns at the
+    same point in time (CAP-7 success criterion) — same underlying read
+    path, different presentation.
+- id: "9"
+  title: Scheduled headless operation
+  description: >-
+    Wire the briefing to OS-scheduled headless invocation with explicit
+    failure logging, never failing silently (SPEC CAP-8).
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implements AD-7's scheduled-run rule: invoke via
+    "claude -p --mcp-config .mcp.json --output-format json" (never --bare);
+    failures append to ledger_data/_ops.log.md rather than failing silently.
