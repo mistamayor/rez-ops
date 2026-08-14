@@ -20,9 +20,11 @@ from ledger_core import projection as projection_module
 from ledger_core import server as server_module
 from ledger_core.log import LogFormatError, append_event, read_events
 from ledger_core.projection import (
+    LOG_FORMAT_ERROR_ARTIFACT_ID,
     LOG_FORMAT_ERROR_MARKER,
     get_coverage_map,
     get_record,
+    list_records,
 )
 from ledger_core.server import mcp
 from shared.ledger_schema import LedgerRecord, RawFact, SchemaValidationError
@@ -199,10 +201,10 @@ def test_ledger_record_rejects_invalid_confidence_value() -> None:
 # --- Acceptance: MCP server exposes exactly one read tool -----------------
 
 
-def test_server_exposes_exactly_three_tools_none_writing_outside_the_log() -> None:
-    """Acceptance criterion: a client listing tools sees exactly three, and
-    (by construction -- see the ingestion/coverage tests below) none of them
-    writes anywhere outside the append-only log.
+def test_server_exposes_exactly_four_tools_none_writing_outside_the_log() -> None:
+    """Acceptance criterion: a client listing tools sees exactly four, and
+    (by construction -- see the ingestion/coverage/list tests below) none of
+    them writes anywhere outside the append-only log.
     """
     tools = asyncio.run(mcp.list_tools())
     names = [tool.name for tool in tools]
@@ -210,6 +212,7 @@ def test_server_exposes_exactly_three_tools_none_writing_outside_the_log() -> No
         "ledger_get_record",
         "ledger_ingest_raw_fact",
         "ledger_get_coverage",
+        "ledger_list_records",
     ]
 
 
@@ -217,8 +220,8 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
     """Redirect every ledger_dir-touching name ledger_core.server binds to an
     isolated tmp ledger dir.
 
-    The server module binds `get_record`, `append_event`, and
-    `get_coverage_map` as plain module-level names (`from ... import ...`),
+    The server module binds `get_record`, `append_event`, `get_coverage_map`,
+    and `list_records` as plain module-level names (`from ... import ...`),
     and each tool handler calls its name with no way to pass a ledger_dir
     through the MCP tool surface. Patching the names the handlers look up at
     call time lets tests exercise the *real* tools without ever touching the
@@ -240,6 +243,13 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
         server_module,
         "get_coverage_map",
         lambda: get_coverage_map(ledger_dir=ledger_dir),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "list_records",
+        lambda artifact_type=None, confidence=None: list_records(
+            artifact_type=artifact_type, confidence=confidence, ledger_dir=ledger_dir
+        ),
     )
 
 
@@ -893,3 +903,618 @@ def test_ledger_ingest_raw_fact_tool_rejects_empty_identifier(
 
     # Nothing was appended anywhere as a result of the rejected ingestion.
     assert not ledger_dir.exists()
+
+
+# ===========================================================================
+# Story 4: chat-queryable live state (last_verified + list_records)
+# ===========================================================================
+
+
+# --- I/O matrix row: first fact populates last_verified ---------------------
+
+
+def test_first_fact_populates_last_verified_matching_event_timestamp(
+    ledger_dir: Path,
+) -> None:
+    fact = RawFact(
+        artifact_type="test_artifact",
+        artifact_id="x1",
+        source="synthetic:test",
+        fields={"observed": "value"},
+    )
+    timestamp = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    append_event(fact, ledger_dir=ledger_dir, timestamp=timestamp)
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    assert record.last_verified == "2026-01-01T12:00:00Z"
+
+
+# --- I/O matrix row: no facts yet -> last_verified stays None --------------
+# Already covered by
+# test_query_for_artifact_with_no_recorded_facts_returns_unknown_never_raises,
+# which asserts record.last_verified is None and record.confidence ==
+# "unknown".
+
+
+# --- I/O matrix row: multiple facts, last_verified tracks the latest ------
+
+
+def test_last_verified_tracks_the_latest_of_two_facts_not_the_first(
+    ledger_dir: Path,
+) -> None:
+    first = RawFact(
+        artifact_type="test_artifact",
+        artifact_id="x1",
+        source="synthetic:test",
+        fields={"observed": "first"},
+    )
+    second = RawFact(
+        artifact_type="test_artifact",
+        artifact_id="x1",
+        source="synthetic:test",
+        fields={"observed": "second"},
+    )
+    first_ts = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    second_ts = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    append_event(first, ledger_dir=ledger_dir, timestamp=first_ts)
+    append_event(second, ledger_dir=ledger_dir, timestamp=second_ts)
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    assert record.last_verified == "2026-06-01T00:00:00Z"
+
+
+def test_ledger_get_record_tool_reports_last_verified_matching_get_record(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fact = RawFact(
+        artifact_type="test_artifact",
+        artifact_id="x1",
+        source="synthetic:test",
+        fields={"observed": "value"},
+    )
+    timestamp = datetime(2026, 3, 1, 8, 30, 0, tzinfo=timezone.utc)
+    append_event(fact, ledger_dir=ledger_dir, timestamp=timestamp)
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_get_record("test_artifact", "x1"))
+
+    assert result.isError is False
+    expected = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    assert result.structuredContent["last_verified"] == expected.last_verified
+    assert result.structuredContent["last_verified"] == "2026-03-01T08:30:00Z"
+
+
+# --- list_records: I/O matrix rows -----------------------------------------
+
+
+async def _call_ledger_list_records(
+    artifact_type: str | None = None, confidence: str | None = None
+):
+    async with create_connected_server_and_client_session(mcp) as client:
+        arguments: dict = {}
+        if artifact_type is not None:
+            arguments["artifact_type"] = artifact_type
+        if confidence is not None:
+            arguments["confidence"] = confidence
+        return await client.call_tool("ledger_list_records", arguments)
+
+
+def test_list_records_no_filters_returns_every_artifact_across_all_types(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="type_b",
+            artifact_id="b1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="type_b",
+            artifact_id="b2",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(ledger_dir=ledger_dir)
+
+    seen = {(record.artifact_type, record.artifact_id) for record in records}
+    assert seen == {("type_a", "a1"), ("type_b", "b1"), ("type_b", "b2")}
+
+
+def test_list_records_filtered_by_artifact_type_returns_only_that_type(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="type_b",
+            artifact_id="b1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(artifact_type="type_a", ledger_dir=ledger_dir)
+
+    assert len(records) == 1
+    assert records[0].artifact_type == "type_a"
+    assert records[0].artifact_id == "a1"
+
+
+def test_list_records_filtered_by_confidence_returns_only_matching_records(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    # Ingested with fields={} -- Story 3's edge case -- projects "unknown".
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a2",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(confidence="unknown", ledger_dir=ledger_dir)
+
+    assert len(records) == 1
+    assert records[0].artifact_id == "a2"
+    assert records[0].confidence == "unknown"
+
+
+def test_list_records_with_corrupted_type_present_surfaces_sentinel_and_healthy(
+    ledger_dir: Path,
+) -> None:
+    """A corrupted type is no longer silently dropped (finding #1): it's
+    represented by exactly one sentinel record alongside the healthy type's
+    real records -- never indistinguishable from "no artifacts of this
+    type exist".
+    """
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+    append_event(
+        RawFact(
+            artifact_type="healthy_type",
+            artifact_id="h1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(ledger_dir=ledger_dir)
+
+    by_type = {record.artifact_type: record for record in records}
+    assert len(records) == 2
+    assert by_type["healthy_type"].artifact_id == "h1"
+    sentinel = by_type["broken_type"]
+    assert sentinel.artifact_id == LOG_FORMAT_ERROR_ARTIFACT_ID
+    assert sentinel.confidence == "unknown"
+    assert sentinel.last_verified is None
+
+
+def test_list_records_filtered_directly_to_corrupted_type_returns_sentinel(
+    ledger_dir: Path,
+) -> None:
+    """Finding #5: filtering directly to the corrupted type's own name (not
+    just encountering it during an unfiltered scan) still surfaces the
+    sentinel rather than an empty list.
+    """
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+
+    records = list_records(artifact_type="broken_type", ledger_dir=ledger_dir)
+
+    assert len(records) == 1
+    assert records[0].artifact_type == "broken_type"
+    assert records[0].artifact_id == LOG_FORMAT_ERROR_ARTIFACT_ID
+
+
+def test_list_records_corrupted_type_sentinel_survives_confidence_filter(
+    ledger_dir: Path,
+) -> None:
+    """The sentinel isn't a real confidence classification, so it must
+    remain visible even when a `confidence` filter that wouldn't otherwise
+    match "unknown" is absent, and even when filtering *for* "unknown" --
+    it should never be silently excluded by the confidence dimension.
+    """
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+    append_event(
+        RawFact(
+            artifact_type="healthy_type",
+            artifact_id="h1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(confidence="agent-verified", ledger_dir=ledger_dir)
+
+    by_type = {record.artifact_type: record for record in records}
+    assert by_type["healthy_type"].confidence == "agent-verified"
+    assert by_type["broken_type"].artifact_id == LOG_FORMAT_ERROR_ARTIFACT_ID
+
+
+def test_list_records_filtered_to_nonexistent_artifact_type_returns_empty(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(artifact_type="does_not_exist", ledger_dir=ledger_dir)
+
+    assert records == []
+
+
+@pytest.mark.parametrize("bad_artifact_type", ["", "_reserved"])
+def test_list_records_rejects_empty_or_reserved_artifact_type_filter(
+    ledger_dir: Path, bad_artifact_type: str
+) -> None:
+    """Finding #2: an explicit `artifact_type` filter can't bypass the
+    empty/reserved-name exclusion discovery already applies -- it must
+    yield an empty list, the same as if that name had never been
+    discovered on disk.
+    """
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    assert list_records(artifact_type=bad_artifact_type, ledger_dir=ledger_dir) == []
+
+
+def test_list_records_returns_empty_when_ledger_dir_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    missing_dir = tmp_path / "does_not_exist"
+    assert not missing_dir.exists()
+
+    assert list_records(ledger_dir=missing_dir) == []
+
+
+def test_list_records_returns_empty_when_ledger_dir_missing_and_artifact_type_given(
+    tmp_path: Path,
+) -> None:
+    """Finding #3: the missing-ledger_dir and explicit-artifact_type-filter
+    edge cases combined -- previously only tested independently.
+    """
+    missing_dir = tmp_path / "does_not_exist"
+    assert not missing_dir.exists()
+
+    assert (
+        list_records(artifact_type="type_a", ledger_dir=missing_dir) == []
+    )
+
+
+def test_list_records_filtered_by_artifact_type_and_confidence_together(
+    ledger_dir: Path,
+) -> None:
+    """Finding #4: the AND interaction between `artifact_type` and
+    `confidence` filters together, not just each dimension in isolation.
+    """
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    # Ingested with fields={} -- projects "unknown" -- same artifact_type.
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a2",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    # A different artifact_type also with an "unknown" record -- must be
+    # excluded by the artifact_type filter even though its confidence matches.
+    append_event(
+        RawFact(
+            artifact_type="type_b",
+            artifact_id="b1",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(
+        artifact_type="type_a", confidence="unknown", ledger_dir=ledger_dir
+    )
+
+    assert len(records) == 1
+    assert records[0].artifact_type == "type_a"
+    assert records[0].artifact_id == "a2"
+
+
+# --- ledger_list_records tool: matches list_records end-to-end ------------
+
+
+def _expected_list_records_payload(records) -> list[dict]:
+    return [
+        {
+            "artifact_type": record.artifact_type,
+            "artifact_id": record.artifact_id,
+            "fields": dict(record.fields),
+            "last_verified": record.last_verified,
+            "verification_method": record.verification_method,
+            "expiry_rule": record.expiry_rule,
+            "tier_sla": record.tier_sla,
+            "escalation_owner": record.escalation_owner,
+            "confidence": record.confidence,
+        }
+        for record in records
+    ]
+
+
+def test_ledger_list_records_tool_no_filters_matches_list_records(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_records())
+
+    assert result.isError is False
+    expected = _expected_list_records_payload(list_records(ledger_dir=ledger_dir))
+    assert result.structuredContent == {"result": expected}
+
+
+def test_ledger_list_records_tool_filtered_by_artifact_type(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="type_b",
+            artifact_id="b1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_records(artifact_type="type_a"))
+
+    assert result.isError is False
+    assert result.structuredContent == {
+        "result": _expected_list_records_payload(
+            list_records(artifact_type="type_a", ledger_dir=ledger_dir)
+        )
+    }
+    assert len(result.structuredContent["result"]) == 1
+    assert result.structuredContent["result"][0]["artifact_type"] == "type_a"
+
+
+def test_ledger_list_records_tool_filtered_by_confidence(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a2",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_records(confidence="unknown"))
+
+    assert result.isError is False
+    records = result.structuredContent["result"]
+    assert len(records) == 1
+    assert records[0]["artifact_id"] == "a2"
+    assert records[0]["confidence"] == "unknown"
+
+
+def test_ledger_list_records_tool_with_corrupted_type_surfaces_sentinel_and_healthy(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+    append_event(
+        RawFact(
+            artifact_type="healthy_type",
+            artifact_id="h1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_records())
+
+    assert result.isError is False
+    records = result.structuredContent["result"]
+    by_type = {record["artifact_type"]: record for record in records}
+    assert len(records) == 2
+    assert by_type["healthy_type"]["artifact_id"] == "h1"
+    assert by_type["broken_type"]["artifact_id"] == LOG_FORMAT_ERROR_ARTIFACT_ID
+    assert by_type["broken_type"]["confidence"] == "unknown"
+
+
+def test_ledger_list_records_tool_filtered_to_nonexistent_type_returns_empty(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_records(artifact_type="does_not_exist"))
+
+    assert result.isError is False
+    assert result.structuredContent == {"result": []}
+
+
+# --- Reuse of the single-pass fold: list_records never re-reads per artifact
+
+
+def test_list_records_reads_each_artifact_type_log_once_not_once_per_artifact(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for artifact_id in ["a1", "a2", "a3"]:
+        append_event(
+            RawFact(
+                artifact_type="test_artifact",
+                artifact_id=artifact_id,
+                source="synthetic:test",
+                fields={"observed": "value"},
+            ),
+            ledger_dir=ledger_dir,
+        )
+
+    call_count = 0
+    original_read_events = projection_module.read_events
+
+    def counting_read_events(artifact_type: str, *, ledger_dir: Path):
+        nonlocal call_count
+        call_count += 1
+        return original_read_events(artifact_type, ledger_dir=ledger_dir)
+
+    monkeypatch.setattr(projection_module, "read_events", counting_read_events)
+
+    records = list_records(ledger_dir=ledger_dir)
+
+    assert len(records) == 3
+    # One read of the artifact-type log total -- not one per artifact_id.
+    assert call_count == 1
+
+
+def test_list_records_reads_each_of_n_distinct_artifact_types_exactly_once(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding #6: N *distinct artifact types* cost exactly N log reads --
+    the existing read-count test above only proves 1 type with multiple
+    artifact_ids costs 1 read, not that scanning multiple types itself
+    stays linear rather than re-reading any one of them.
+    """
+    for artifact_type, artifact_ids in [
+        ("type_a", ["a1", "a2"]),
+        ("type_b", ["b1"]),
+        ("type_c", ["c1", "c2", "c3"]),
+    ]:
+        for artifact_id in artifact_ids:
+            append_event(
+                RawFact(
+                    artifact_type=artifact_type,
+                    artifact_id=artifact_id,
+                    source="synthetic:test",
+                    fields={"observed": "value"},
+                ),
+                ledger_dir=ledger_dir,
+            )
+
+    call_count = 0
+    original_read_events = projection_module.read_events
+
+    def counting_read_events(artifact_type: str, *, ledger_dir: Path):
+        nonlocal call_count
+        call_count += 1
+        return original_read_events(artifact_type, ledger_dir=ledger_dir)
+
+    monkeypatch.setattr(projection_module, "read_events", counting_read_events)
+
+    records = list_records(ledger_dir=ledger_dir)
+
+    assert len(records) == 6
+    # Exactly one read per distinct artifact_type (3), never one per
+    # artifact_id (6) and never a re-read of any type already scanned.
+    assert call_count == 3

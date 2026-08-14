@@ -25,3 +25,15 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/3-confidence-and-coverage-computation.md`
   summary: `ledger_get_coverage` returns the full tally for every artifact_type/artifact_id with no pagination or size limit.
   evidence: Fine at current scale (a handful of artifact types from one connector); revisit once real connectors (Story 5+) push the artifact count high enough that the response size or read cost becomes a real concern.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/4-chat-queryable-live-state.md`
+  summary: `list_records`/`ledger_list_records` don't validate the `confidence` filter value -- a typo (e.g. "unkown") silently returns zero matches, indistinguishable from "nothing actually matches."
+  evidence: Low real-world risk since the Runtime/LLM caller typically already knows valid confidence values from prior get_record/get_coverage responses, but worth a guard if it ever causes real confusion.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/4-chat-queryable-live-state.md`
+  summary: No documented or tested ordering guarantee for `list_records` results spanning multiple artifact types.
+  evidence: Not needed yet since the Voice/LLM layer can sort or filter conversationally, but a "chat-queryable" feature may eventually want stable ordering across repeated calls; no clear correct default (alphabetical, insertion, by last_verified) has been decided.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/4-chat-queryable-live-state.md`
+  summary: `ledger_list_records` has no pagination or size limit, same category as `ledger_get_coverage`'s existing deferral.
+  evidence: Fine at current scale; revisit alongside the coverage pagination deferral once real connector volume grows.

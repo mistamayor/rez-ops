@@ -1,11 +1,12 @@
 """Ledger-core MCP server (AD-1, AD-2): ledger-core is its own MCP server.
 
-Exposes three tools: a read/query surface over projection.py
-(`ledger_get_record`, `ledger_get_coverage`), and the one and only ingestion
-path into the append-only log (`ledger_ingest_raw_fact`). Ledger state can
-only ever be changed by appending to the log (AD-3) -- `ledger_ingest_raw_fact`
-constructs a `RawFact` and calls `append_event`; it has no other side effect
-and no `confidence` parameter (confidence is computed exclusively by
+Exposes four tools: a read/query surface over projection.py
+(`ledger_get_record`, `ledger_get_coverage`, `ledger_list_records`), and the
+one and only ingestion path into the append-only log
+(`ledger_ingest_raw_fact`). Ledger state can only ever be changed by
+appending to the log (AD-3) -- `ledger_ingest_raw_fact` constructs a
+`RawFact` and calls `append_event`; it has no other side effect and no
+`confidence` parameter (confidence is computed exclusively by
 `projection.get_record`, AD-5).
 """
 
@@ -16,7 +17,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from ledger_core.log import append_event
-from ledger_core.projection import get_coverage_map, get_record
+from ledger_core.projection import get_coverage_map, get_record, list_records
 from shared.ledger_schema import RawFact
 
 mcp = FastMCP("ledger-core")
@@ -29,7 +30,9 @@ def ledger_get_record(artifact_type: str, artifact_id: str) -> dict[str, Any]:
     Computed by purely replaying that artifact type's append-only event log
     (AD-3) -- never a cached or hand-edited value. An artifact with no
     recorded facts returns empty fields and confidence "unknown" rather than
-    an error.
+    an error. `verification_method`, `expiry_rule`, `tier_sla`, and
+    `escalation_owner` are intentionally always `None` in this story --
+    nothing populates them yet.
     """
     record = get_record(artifact_type, artifact_id)
     return {
@@ -92,6 +95,49 @@ def ledger_get_coverage() -> dict[str, dict[str, int]]:
     computed and returned (AD-8: graceful degradation).
     """
     return get_coverage_map()
+
+
+@mcp.tool(name="ledger_list_records")
+def ledger_list_records(
+    artifact_type: str | None = None, confidence: str | None = None
+) -> list[dict[str, Any]]:
+    """List every known LedgerRecord, optionally filtered by artifact_type and/or confidence.
+
+    Lets a caller ask "what's stale" or "what's unknown" without already
+    knowing every artifact's exact ID (CAP-4) -- `ledger_get_record` needs
+    an exact `artifact_id`, and `ledger_get_coverage` only returns counts.
+    Computed by replaying the relevant artifact-type log(s) (AD-3) -- never
+    cached -- reusing the same single-pass fold `ledger_get_record` and
+    `ledger_get_coverage` already use, so listing never re-reads a log once
+    per artifact.
+
+    If one artifact_type's log is corrupted, that type is not silently
+    dropped: it is represented by exactly one sentinel record
+    (`artifact_id="_log_format_error"`, `confidence="unknown"`) rather than
+    being indistinguishable from "no artifacts of this type exist" --
+    genuinely equivalent to `ledger_get_coverage`'s visibility for the same
+    failure (AD-8), returned regardless of any `confidence` filter. Returns
+    an empty list rather than raising for a nonexistent, empty-string, or
+    reserved (`_`-prefixed) `artifact_type`, or when no record matches the
+    given filters. `verification_method`, `expiry_rule`, `tier_sla`, and
+    `escalation_owner` are intentionally always `None` in this story --
+    nothing populates them yet.
+    """
+    records = list_records(artifact_type=artifact_type, confidence=confidence)
+    return [
+        {
+            "artifact_type": record.artifact_type,
+            "artifact_id": record.artifact_id,
+            "fields": dict(record.fields),
+            "last_verified": record.last_verified,
+            "verification_method": record.verification_method,
+            "expiry_rule": record.expiry_rule,
+            "tier_sla": record.tier_sla,
+            "escalation_owner": record.escalation_owner,
+            "confidence": record.confidence,
+        }
+        for record in records
+    ]
 
 
 def main() -> None:
