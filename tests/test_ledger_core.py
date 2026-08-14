@@ -15,9 +15,15 @@ from pathlib import Path
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
+from connectors.git_repo.server import git_get_last_touched
+from ledger_core import projection as projection_module
 from ledger_core import server as server_module
 from ledger_core.log import LogFormatError, append_event, read_events
-from ledger_core.projection import get_record
+from ledger_core.projection import (
+    LOG_FORMAT_ERROR_MARKER,
+    get_coverage_map,
+    get_record,
+)
 from ledger_core.server import mcp
 from shared.ledger_schema import LedgerRecord, RawFact, SchemaValidationError
 
@@ -30,7 +36,7 @@ def ledger_dir(tmp_path: Path) -> Path:
 # --- I/O matrix row 1: new RawFact ingested -------------------------------
 
 
-def test_new_rawfact_ingested_appends_event_and_projects_unknown_confidence(
+def test_new_rawfact_ingested_appends_event_and_projects_agent_verified_confidence(
     ledger_dir: Path,
 ) -> None:
     fact = RawFact(
@@ -50,10 +56,12 @@ def test_new_rawfact_ingested_appends_event_and_projects_unknown_confidence(
     assert "artifact=test_artifact/x1" in line
     assert json.dumps({"observed": "value"}, sort_keys=True) in line
 
+    # Story 3 (AD-5): a real, non-empty observed field now projects
+    # confidence "agent-verified" instead of the old hardcoded "unknown".
     record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
     assert isinstance(record, LedgerRecord)
     assert record.fields == {"observed": "value"}
-    assert record.confidence == "unknown"
+    assert record.confidence == "agent-verified"
 
 
 # --- I/O matrix row 2: conflicting RawFacts for the same artifact ---------
@@ -191,21 +199,30 @@ def test_ledger_record_rejects_invalid_confidence_value() -> None:
 # --- Acceptance: MCP server exposes exactly one read tool -----------------
 
 
-def test_server_exposes_exactly_one_read_only_tool() -> None:
+def test_server_exposes_exactly_three_tools_none_writing_outside_the_log() -> None:
+    """Acceptance criterion: a client listing tools sees exactly three, and
+    (by construction -- see the ingestion/coverage tests below) none of them
+    writes anywhere outside the append-only log.
+    """
     tools = asyncio.run(mcp.list_tools())
     names = [tool.name for tool in tools]
-    assert names == ["ledger_get_record"]
+    assert names == [
+        "ledger_get_record",
+        "ledger_ingest_raw_fact",
+        "ledger_get_coverage",
+    ]
 
 
 def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
-    """Redirect ledger_core.server's get_record to an isolated tmp ledger dir.
+    """Redirect every ledger_dir-touching name ledger_core.server binds to an
+    isolated tmp ledger dir.
 
-    The server module binds `get_record` as a plain module-level name (from
-    `from ledger_core.projection import get_record`), and its tool handler
-    calls it with only (artifact_type, artifact_id) -- there's no built-in
-    way to pass a ledger_dir through the MCP tool surface. Patching the name
-    the handler looks up at call time lets tests exercise the *real* tool
-    without ever touching the real, git-committed ledger_data/ directory.
+    The server module binds `get_record`, `append_event`, and
+    `get_coverage_map` as plain module-level names (`from ... import ...`),
+    and each tool handler calls its name with no way to pass a ledger_dir
+    through the MCP tool surface. Patching the names the handlers look up at
+    call time lets tests exercise the *real* tools without ever touching the
+    real, git-committed ledger_data/ directory.
     """
     monkeypatch.setattr(
         server_module,
@@ -213,6 +230,16 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
         lambda artifact_type, artifact_id: get_record(
             artifact_type, artifact_id, ledger_dir=ledger_dir
         ),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "append_event",
+        lambda fact: append_event(fact, ledger_dir=ledger_dir),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "get_coverage_map",
+        lambda: get_coverage_map(ledger_dir=ledger_dir),
     )
 
 
@@ -411,3 +438,458 @@ def test_get_record_skips_non_rawfact_event_type(ledger_dir: Path) -> None:
     record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
 
     assert record.fields == {}
+
+
+# ===========================================================================
+# Story 3: confidence and coverage computation
+# ===========================================================================
+
+
+async def _call_ledger_ingest_raw_fact(
+    artifact_type: str, artifact_id: str, source: str, fields: dict
+):
+    async with create_connected_server_and_client_session(mcp) as client:
+        return await client.call_tool(
+            "ledger_ingest_raw_fact",
+            {
+                "artifact_type": artifact_type,
+                "artifact_id": artifact_id,
+                "source": source,
+                "fields": fields,
+            },
+        )
+
+
+async def _call_ledger_get_coverage():
+    async with create_connected_server_and_client_session(mcp) as client:
+        return await client.call_tool("ledger_get_coverage", {})
+
+
+# --- I/O matrix row: end-to-end connector fact ingested -------------------
+
+
+def test_end_to_end_git_connector_fact_ingested_shows_agent_verified(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Feeds a *real* git connector fact (for a real, tracked file in this
+    repo) into `ledger_ingest_raw_fact`, then confirms `ledger_get_record`
+    reflects it -- proving the Sensor -> Ledger wiring end-to-end rather than
+    with a synthetic RawFact.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    connector_result = git_get_last_touched(
+        repo_path=str(repo_root),
+        file_path="pyproject.toml",
+        artifact_type="test_artifact",
+        artifact_id="e2e1",
+    )
+
+    _point_server_at(monkeypatch, ledger_dir)
+
+    ingest_result = asyncio.run(
+        _call_ledger_ingest_raw_fact(
+            connector_result["artifact_type"],
+            connector_result["artifact_id"],
+            connector_result["source"],
+            connector_result["fields"],
+        )
+    )
+    assert ingest_result.isError is False
+
+    record_result = asyncio.run(
+        _call_ledger_get_record("test_artifact", "e2e1")
+    )
+    assert record_result.isError is False
+    assert record_result.structuredContent["confidence"] == "agent-verified"
+    assert record_result.structuredContent["fields"] == connector_result["fields"]
+
+
+# --- I/O matrix row: query before any fact exists (unchanged from Story 1) -
+
+
+def test_ledger_get_record_tool_reports_unknown_before_any_fact_exists(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_get_record("test_artifact", "never-ingested"))
+
+    assert result.isError is False
+    assert result.structuredContent["confidence"] == "unknown"
+    assert result.structuredContent["fields"] == {}
+
+
+# --- I/O matrix row: ingest payload violates the schema --------------------
+
+
+def test_ledger_ingest_raw_fact_tool_rejects_ledger_only_field_without_appending(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(
+        _call_ledger_ingest_raw_fact(
+            "test_artifact",
+            "x1",
+            "synthetic:test",
+            {"confidence": "agent-verified"},
+        )
+    )
+
+    assert result.isError is True
+    assert result.content
+    assert "confidence" in result.content[0].text
+
+    # Nothing was appended as a result of the rejected ingestion.
+    assert read_events("test_artifact", ledger_dir=ledger_dir) == []
+    assert not (ledger_dir / "test_artifact.log.md").exists()
+
+
+def test_ledger_ingest_raw_fact_tool_appends_and_is_visible_via_get_record(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _point_server_at(monkeypatch, ledger_dir)
+
+    ingest_result = asyncio.run(
+        _call_ledger_ingest_raw_fact(
+            "test_artifact", "x1", "synthetic:test", {"observed": "value"}
+        )
+    )
+    assert ingest_result.isError is False
+    assert ingest_result.structuredContent == {
+        "artifact_type": "test_artifact",
+        "artifact_id": "x1",
+        "source": "synthetic:test",
+        "fields": {"observed": "value"},
+    }
+
+    record_result = asyncio.run(_call_ledger_get_record("test_artifact", "x1"))
+    assert record_result.structuredContent["confidence"] == "agent-verified"
+    assert record_result.structuredContent["fields"] == {"observed": "value"}
+
+
+# --- I/O matrix row: coverage map, multiple types and confidence states ---
+
+
+def test_coverage_map_tallies_confidence_per_artifact_type_matching_get_record(
+    ledger_dir: Path,
+) -> None:
+    # type_a/a1: a real observed field -> agent-verified.
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    # type_a/a2: ingested with no observed fields at all -> unknown, despite
+    # a fact having been appended (the confidence rule keys off `fields`
+    # being non-empty, not merely "some event exists").
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a2",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    # type_b/b1: a different artifact_type, also agent-verified.
+    append_event(
+        RawFact(
+            artifact_type="type_b",
+            artifact_id="b1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    coverage = get_coverage_map(ledger_dir=ledger_dir)
+
+    assert coverage == {
+        "type_a": {"agent-verified": 1, "unknown": 1},
+        "type_b": {"agent-verified": 1},
+    }
+
+    # Matches exactly what ledger_get_record reports for each artifact.
+    assert get_record("type_a", "a1", ledger_dir=ledger_dir).confidence == (
+        "agent-verified"
+    )
+    assert get_record("type_a", "a2", ledger_dir=ledger_dir).confidence == "unknown"
+    assert get_record("type_b", "b1", ledger_dir=ledger_dir).confidence == (
+        "agent-verified"
+    )
+    # An artifact never ingested at all is "unknown" via get_record but,
+    # having no log entry, cannot appear in the coverage tally.
+    assert get_record("type_a", "never-ingested", ledger_dir=ledger_dir).confidence == (
+        "unknown"
+    )
+
+
+def test_ledger_get_coverage_tool_matches_get_coverage_map(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="a1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_get_coverage())
+
+    assert result.isError is False
+    assert result.structuredContent == get_coverage_map(ledger_dir=ledger_dir)
+
+
+# --- I/O matrix row: coverage map with no data yet --------------------------
+
+
+def test_coverage_map_returns_empty_when_ledger_dir_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    missing_dir = tmp_path / "does_not_exist"
+    assert not missing_dir.exists()
+
+    assert get_coverage_map(ledger_dir=missing_dir) == {}
+
+
+def test_coverage_map_returns_empty_when_ledger_dir_is_empty(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+
+    assert get_coverage_map(ledger_dir=ledger_dir) == {}
+
+
+# --- I/O matrix row: coverage map ignores reserved logs ---------------------
+
+
+def test_coverage_map_excludes_reserved_underscore_prefixed_logs(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "_ops.log.md").write_text(
+        "- (rawfact) 2026-01-01T00:00:00Z source=synthetic:test "
+        'artifact=_ops/incident-1 fields={"note": "scheduled run failed"}\n',
+        encoding="utf-8",
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    coverage = get_coverage_map(ledger_dir=ledger_dir)
+
+    assert "_ops" not in coverage
+    assert coverage == {"test_artifact": {"agent-verified": 1}}
+
+
+# ===========================================================================
+# Story 3 review findings: get_coverage_map robustness across multiple
+# artifact-type logs.
+# ===========================================================================
+
+
+# --- Finding 1: ledger_dir exists but is a non-directory file --------------
+
+
+def test_coverage_map_returns_empty_when_ledger_dir_is_a_file(
+    tmp_path: Path,
+) -> None:
+    blocked_path = tmp_path / "ledger_data_blocked"
+    blocked_path.write_text("not a directory", encoding="utf-8")
+
+    assert get_coverage_map(ledger_dir=blocked_path) == {}
+
+
+# --- Finding 2: a log file with no artifact-type prefix (literal ".log.md") -
+
+
+def test_coverage_map_skips_log_file_with_empty_artifact_type(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    # Content is irrelevant -- the empty artifact_type derived from the
+    # filename itself is what must be skipped, before any attempt to parse.
+    (ledger_dir / ".log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    coverage = get_coverage_map(ledger_dir=ledger_dir)
+
+    assert "" not in coverage
+    assert coverage == {"test_artifact": {"agent-verified": 1}}
+
+
+# --- Finding 3: one corrupted artifact-type log must not blind the rest ----
+
+
+def test_coverage_map_isolates_log_format_error_to_its_own_artifact_type(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+    append_event(
+        RawFact(
+            artifact_type="healthy_type",
+            artifact_id="h1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    coverage = get_coverage_map(ledger_dir=ledger_dir)
+
+    # The healthy type's tally is unaffected by the other type's corruption.
+    assert coverage["healthy_type"] == {"agent-verified": 1}
+    # The corrupted type's problem is visible, not silently dropped.
+    assert coverage["broken_type"] == {LOG_FORMAT_ERROR_MARKER: 1}
+
+
+# --- Finding 4: coverage tallying reads each artifact-type log once -------
+
+
+def test_get_coverage_map_reads_each_artifact_type_log_once_not_once_per_artifact(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for artifact_id in ["a1", "a2", "a3"]:
+        append_event(
+            RawFact(
+                artifact_type="test_artifact",
+                artifact_id=artifact_id,
+                source="synthetic:test",
+                fields={"observed": "value"},
+            ),
+            ledger_dir=ledger_dir,
+        )
+
+    call_count = 0
+    original_read_events = projection_module.read_events
+
+    def counting_read_events(artifact_type: str, *, ledger_dir: Path):
+        nonlocal call_count
+        call_count += 1
+        return original_read_events(artifact_type, ledger_dir=ledger_dir)
+
+    monkeypatch.setattr(projection_module, "read_events", counting_read_events)
+
+    coverage = get_coverage_map(ledger_dir=ledger_dir)
+
+    assert coverage == {"test_artifact": {"agent-verified": 3}}
+    # One read of the artifact-type log total -- not one per artifact_id
+    # (an N+1 re-read across 3 artifacts would make call_count == 4: the
+    # initial pass to discover artifact_ids plus one get_record per id).
+    assert call_count == 1
+
+
+# --- Finding 6: a directory matching the *.log.md naming is skipped --------
+
+
+def test_coverage_map_skips_directory_named_like_a_log_file(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "not_a_file.log.md").mkdir()
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    coverage = get_coverage_map(ledger_dir=ledger_dir)
+
+    assert "not_a_file" not in coverage
+    assert coverage == {"test_artifact": {"agent-verified": 1}}
+
+
+# --- Finding 5: ledger_ingest_raw_fact tool with fields={} via the tool ----
+# ----------------------------------------------------------------- path ---
+
+
+def test_ledger_ingest_raw_fact_tool_with_empty_fields_reports_unknown_via_get_record_tool(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fields={} -> "unknown" edge case, exercised through the actual
+    ledger_ingest_raw_fact and ledger_get_record MCP tool calls rather than
+    the direct projection/log functions.
+    """
+    _point_server_at(monkeypatch, ledger_dir)
+
+    ingest_result = asyncio.run(
+        _call_ledger_ingest_raw_fact("test_artifact", "x1", "synthetic:test", {})
+    )
+    assert ingest_result.isError is False
+
+    record_result = asyncio.run(_call_ledger_get_record("test_artifact", "x1"))
+
+    assert record_result.isError is False
+    assert record_result.structuredContent["confidence"] == "unknown"
+    assert record_result.structuredContent["fields"] == {}
+
+
+# --- Finding 7: ledger_ingest_raw_fact tool rejects empty identifiers ------
+
+
+@pytest.mark.parametrize("field_name", ["artifact_type", "artifact_id"])
+def test_ledger_ingest_raw_fact_tool_rejects_empty_identifier(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch, field_name: str
+) -> None:
+    """RawFact's Story-1 charset validation already rejects an empty
+    artifact_type/artifact_id at construction time (the identifier regex
+    requires at least one character) -- this proves that rejection surfaces
+    correctly through the ledger_ingest_raw_fact tool call path itself.
+    """
+    _point_server_at(monkeypatch, ledger_dir)
+
+    kwargs = {
+        "artifact_type": "test_artifact",
+        "artifact_id": "x1",
+        "source": "synthetic:test",
+        "fields": {},
+    }
+    kwargs[field_name] = ""
+
+    result = asyncio.run(
+        _call_ledger_ingest_raw_fact(
+            kwargs["artifact_type"],
+            kwargs["artifact_id"],
+            kwargs["source"],
+            kwargs["fields"],
+        )
+    )
+
+    assert result.isError is True
+    assert result.content
+    assert field_name in result.content[0].text
+
+    # Nothing was appended anywhere as a result of the rejected ingestion.
+    assert not ledger_dir.exists()

@@ -21,3 +21,7 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/2-first-connector-git.md`
   summary: `_build_source`'s sanitization can theoretically map two different (repo_path, commit_sha) pairs to an identical `source` string, since multiple disallowed characters all collapse to the same `_` replacement.
   evidence: Extremely unlikely in practice since the full 40-character commit SHA is already included, and nothing in the codebase parses `source` back into components today -- not worth a fix until `source` is actually consumed as more than a display/audit string.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/3-confidence-and-coverage-computation.md`
+  summary: `ledger_get_coverage` returns the full tally for every artifact_type/artifact_id with no pagination or size limit.
+  evidence: Fine at current scale (a handful of artifact types from one connector); revisit once real connectors (Story 5+) push the artifact count high enough that the response size or read cost becomes a real concern.
