@@ -37,3 +37,19 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/4-chat-queryable-live-state.md`
   summary: `ledger_list_records` has no pagination or size limit, same category as `ledger_get_coverage`'s existing deferral.
   evidence: Fine at current scale; revisit alongside the coverage pagination deferral once real connector volume grows.
+
+- source_spec: none
+  summary: Calendar connector, deferred from Story 5's original "calendar, ticketing, CMDB" scope.
+  evidence: Story 5 covered three independently shippable connectors bundled as one story; split so each is built, reviewed, and committed on its own (same rhythm as Story 2). Ticketing was picked to go first.
+
+- source_spec: none
+  summary: CMDB connector, deferred from Story 5's original "calendar, ticketing, CMDB" scope.
+  evidence: Story 5 covered three independently shippable connectors bundled as one story; split so each is built, reviewed, and committed on its own (same rhythm as Story 2). Ticketing was picked to go first.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/5-ticketing-connector-servicenow.md`
+  summary: The ticketing connector has no retry/backoff for transient failures, and HTTP 429 (ServiceNow rate limiting) isn't distinguished from other error types.
+  evidence: A single connection error, timeout, or throttling response is treated as an immediate hard failure; fine for a low-frequency, on-demand tool, but worth revisiting if it's ever polled frequently enough to hit real rate limits.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/5-ticketing-connector-servicenow.md`
+  summary: A new httpx.Client is constructed and torn down on every call, with no connection pooling/reuse across invocations.
+  evidence: A full TCP/TLS handshake per call is acceptable for an on-demand status check but would matter if this tool were polled repeatedly during a DR runbook; revisit if usage patterns change.

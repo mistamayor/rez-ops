@@ -5,6 +5,7 @@ description = "Rez Ops — AI agent framework for Disaster Recovery program mana
 requires-python = ">=3.13"
 dependencies = [
     "mcp>=1.29,<2",
+    "httpx>=0.28,<1",
 ]
 
 [dependency-groups]
