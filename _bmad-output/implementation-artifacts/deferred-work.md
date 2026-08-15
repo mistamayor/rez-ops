@@ -53,3 +53,23 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/5-ticketing-connector-servicenow.md`
   summary: A new httpx.Client is constructed and torn down on every call, with no connection pooling/reuse across invocations.
   evidence: A full TCP/TLS handshake per call is acceptable for an on-demand status check but would matter if this tool were polled repeatedly during a DR runbook; revisit if usage patterns change.
+
+- source_spec: none
+  summary: Microsoft 365 / Outlook calendar connector, deferred from the calendar connector's own further split (user wanted both Google Calendar and Microsoft 365).
+  evidence: The two calendar backends have completely different auth and API shapes and are independently shippable, same reasoning as the original Story 5 split; Google Calendar was picked to go first.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/6-calendar-connector-google.md`
+  summary: `_build_source`'s character sanitization can theoretically collide two distinct (calendar_id, event_id) pairs into an identical source string.
+  evidence: Same class of risk already accepted for the git and ticketing connectors' source construction -- extremely unlikely in practice given both identifiers are included, not worth a fix until source is consumed as more than a display/audit string.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/6-calendar-connector-google.md`
+  summary: No HTTP 429/retry-backoff handling for the Google Calendar connector.
+  evidence: Same category as the ticketing connector's existing deferral; fine for a low-frequency, on-demand tool.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/6-calendar-connector-google.md`
+  summary: No response-body size guard before JSON-parsing the Calendar API response.
+  evidence: Low risk against a well-behaved, documented Google API; revisit if this ever proves to be a real problem.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/6-calendar-connector-google.md`
+  summary: No test or documented behavior for a 3xx redirect response from the Calendar API.
+  evidence: Low likelihood against a fixed, well-known Google API endpoint; falls into the generic error branch today, untested but not obviously wrong.
