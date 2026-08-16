@@ -73,3 +73,23 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/6-calendar-connector-google.md`
   summary: No test or documented behavior for a 3xx redirect response from the Calendar API.
   evidence: Low likelihood against a fixed, well-known Google API endpoint; falls into the generic error branch today, untested but not obviously wrong.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/7-cmdb-connector-servicenow.md`
+  summary: No response-body size guard before JSON-parsing the CMDB connector's ServiceNow response.
+  evidence: Same category as the calendar connector's existing deferral; low risk against a well-behaved, documented API.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/7-cmdb-connector-servicenow.md`
+  summary: No HTTP 429/retry-backoff handling for the CMDB connector.
+  evidence: Same category as the ticketing connector's existing deferral; fine for a low-frequency, on-demand tool.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/7-cmdb-connector-servicenow.md`
+  summary: A new httpx.Client is constructed and torn down on every call, with no connection pooling/reuse -- same category as the ticketing connector's existing deferral.
+  evidence: Acceptable for an on-demand status check; revisit if usage patterns change.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/7-cmdb-connector-servicenow.md`
+  summary: `_build_source`'s character sanitization can theoretically collide distinct (instance_url, table, sys_id) triples into an identical source string -- same accepted risk class as git/ticketing/calendar.
+  evidence: Extremely unlikely in practice; not worth a fix until source is consumed as more than a display/audit string.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/7-cmdb-connector-servicenow.md`
+  summary: No test or documented behavior for a 3xx redirect response from ServiceNow's Table API.
+  evidence: Same category as the calendar connector's existing deferral; falls into the generic error branch today, untested but not obviously wrong.
