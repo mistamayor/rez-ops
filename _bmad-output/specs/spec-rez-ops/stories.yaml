@@ -19,7 +19,8 @@
   done_checkpoint: false
   invoke_dev_with: >-
     Implements AD-1/AD-2 (Sensor pattern, domain-prefixed tool naming, e.g.
-    git_list_items). Establishes the connector pattern Story 5 repeats.
+    git_list_items). Establishes the connector pattern later connectors
+    repeat.
 - id: "3"
   title: Confidence and coverage computation
   description: >-
@@ -43,16 +44,42 @@
     read-only presentation of ledger-core state, no domain logic in the
     runtime.
 - id: "5"
-  title: "Remaining connectors: calendar, ticketing, CMDB"
+  title: "Ticketing connector: ServiceNow"
   description: >-
-    Extend the connector pattern proven in Story 2 to the remaining three
-    domains (SPEC CAP-2 completion).
+    Second Sensor: ticketing_get_ticket_status against ServiceNow's Table
+    API (SPEC CAP-2). Split off from the original bundled "calendar,
+    ticketing, CMDB" story since each connector is independently shippable.
   spec_checkpoint: false
   done_checkpoint: false
   invoke_dev_with: >-
-    Repeat Story 2's connector pattern for the three remaining domains
-    (AD-2 domain-prefixed tool naming per connector).
+    Implements AD-1/AD-2 against a real external HTTP API for the first
+    time (git was a local subprocess). No auto-correlation — caller
+    supplies the exact table/sys_id.
 - id: "6"
+  title: "Calendar connector: Google Calendar"
+  description: >-
+    Third Sensor: calendar_get_event_status against the Google Calendar API
+    v3 (SPEC CAP-2). Further split from a "both Google and Microsoft 365"
+    ask; Microsoft 365 tracked in deferred-work.md.
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Flattens Google's nested start/end/organizer fields to scalars — apply
+    every hardening lesson already found in the ticketing connector's
+    review from the start.
+- id: "7"
+  title: "CMDB connector: ServiceNow"
+  description: >-
+    Fourth and last connector from the original brief's brainstormed scope:
+    cmdb_get_ci_status against ServiceNow's Table API (SPEC CAP-2
+    completion). Closes out CAP-2.
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Independent connector server from ticketing despite sharing a vendor
+    (AD-2) — separate credentials, no shared code. Apply every hardening
+    lesson from ticketing's and calendar's reviews from the start.
+- id: "8"
   title: Ownership inference and arbitration
   description: >-
     Implement the per-field ownership map and orphan-risk escalation across
@@ -63,10 +90,10 @@
   invoke_dev_with: >-
     Implements AD-10: per-field ownership map, conflicting RawFacts logged
     not overwritten, absence of any signal escalates to confidence=unknown
-    plus the orphan-risk list. Needs at least two connectors reporting an
-    overlapping ownership-bearing field (e.g. escalation_owner) to exercise
-    arbitration for real.
-- id: "7"
+    plus the orphan-risk list. Four connectors now exist (git, ticketing,
+    calendar, CMDB) to exercise arbitration against a real overlapping
+    field (e.g. escalation_owner).
+- id: "9"
   title: Draft-not-send outbound content
   description: >-
     Add ledger-core's dedicated write tool and git-tracked drafts queue for
@@ -76,7 +103,7 @@
   invoke_dev_with: >-
     Implements AD-6: drafts are created only via ledger-core's write tool,
     never a direct filesystem write from any other component.
-- id: "8"
+- id: "10"
   title: Periodic briefing
   description: >-
     Generate a ranked briefing from the same live state Story 4's queries
@@ -87,7 +114,7 @@
     Briefing content must match what Story 4's live query returns at the
     same point in time (CAP-7 success criterion) — same underlying read
     path, different presentation.
-- id: "9"
+- id: "11"
   title: Scheduled headless operation
   description: >-
     Wire the briefing to OS-scheduled headless invocation with explicit
