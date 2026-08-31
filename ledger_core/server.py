@@ -30,9 +30,13 @@ def ledger_get_record(artifact_type: str, artifact_id: str) -> dict[str, Any]:
     Computed by purely replaying that artifact type's append-only event log
     (AD-3) -- never a cached or hand-edited value. An artifact with no
     recorded facts returns empty fields and confidence "unknown" rather than
-    an error. `verification_method`, `expiry_rule`, `tier_sla`, and
-    `escalation_owner` are intentionally always `None` in this story --
-    nothing populates them yet.
+    an error. `verification_method`, `expiry_rule`, and `tier_sla` are
+    intentionally always `None` in this story -- nothing populates them yet.
+    `escalation_owner` is computed from a fixed field-priority order over
+    `support_group` (CMDB) > `assigned_to` (ticketing) > `organizer_email`
+    (calendar) -- `None` if none of those three fields carries a non-blank
+    string value (a missing/`None` value, a blank/whitespace-only string,
+    and a non-string scalar all fall through the same way) (AD-10).
     """
     record = get_record(artifact_type, artifact_id)
     return {
@@ -99,31 +103,44 @@ def ledger_get_coverage() -> dict[str, dict[str, int]]:
 
 @mcp.tool(name="ledger_list_records")
 def ledger_list_records(
-    artifact_type: str | None = None, confidence: str | None = None
+    artifact_type: str | None = None,
+    confidence: str | None = None,
+    orphan_risk: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """List every known LedgerRecord, optionally filtered by artifact_type and/or confidence.
+    """List every known LedgerRecord, optionally filtered by artifact_type, confidence, and/or orphan_risk.
 
-    Lets a caller ask "what's stale" or "what's unknown" without already
-    knowing every artifact's exact ID (CAP-4) -- `ledger_get_record` needs
-    an exact `artifact_id`, and `ledger_get_coverage` only returns counts.
-    Computed by replaying the relevant artifact-type log(s) (AD-3) -- never
-    cached -- reusing the same single-pass fold `ledger_get_record` and
-    `ledger_get_coverage` already use, so listing never re-reads a log once
-    per artifact.
+    Lets a caller ask "what's stale", "what's unknown", or "what's at risk
+    of having no owner" without already knowing every artifact's exact ID
+    (CAP-4, CAP-5) -- `ledger_get_record` needs an exact `artifact_id`, and
+    `ledger_get_coverage` only returns counts. Computed by replaying the
+    relevant artifact-type log(s) (AD-3) -- never cached -- reusing the same
+    single-pass fold `ledger_get_record` and `ledger_get_coverage` already
+    use, so listing never re-reads a log once per artifact.
+
+    `orphan_risk`, if given, filters to records where `fields` is non-empty
+    AND `escalation_owner` is `None` (when `True`), or the inverse (when
+    `False`) -- computed with the same fixed field-priority order
+    `ledger_get_record` uses (AD-10). An artifact never observed at all
+    (`fields` entirely empty) is never orphan-risk -- orphan-risk means
+    "known but unowned," not "unknown." `artifact_type`, `confidence`, and
+    `orphan_risk` combine as an AND across all given filters. An empty
+    result (e.g. no orphans at all) is returned as `[]`, never an error.
 
     If one artifact_type's log is corrupted, that type is not silently
     dropped: it is represented by exactly one sentinel record
     (`artifact_id="_log_format_error"`, `confidence="unknown"`) rather than
     being indistinguishable from "no artifacts of this type exist" --
     genuinely equivalent to `ledger_get_coverage`'s visibility for the same
-    failure (AD-8), returned regardless of any `confidence` filter. Returns
-    an empty list rather than raising for a nonexistent, empty-string, or
-    reserved (`_`-prefixed) `artifact_type`, or when no record matches the
-    given filters. `verification_method`, `expiry_rule`, `tier_sla`, and
-    `escalation_owner` are intentionally always `None` in this story --
-    nothing populates them yet.
+    failure (AD-8), returned regardless of any `confidence` or `orphan_risk`
+    filter. Returns an empty list rather than raising for a nonexistent,
+    empty-string, or reserved (`_`-prefixed) `artifact_type`, or when no
+    record matches the given filters. `verification_method`, `expiry_rule`,
+    and `tier_sla` are intentionally always `None` in this story -- nothing
+    populates them yet.
     """
-    records = list_records(artifact_type=artifact_type, confidence=confidence)
+    records = list_records(
+        artifact_type=artifact_type, confidence=confidence, orphan_risk=orphan_risk
+    )
     return [
         {
             "artifact_type": record.artifact_type,

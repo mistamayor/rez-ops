@@ -65,10 +65,15 @@ _HTTP_TIMEOUT_SECONDS = 10.0
 
 #: Fields expected in a ServiceNow Table API CI record's `result` object.
 #: Missing any of these (or present but `None`) is treated as a malformed
-#: response (typed error), never a raw `KeyError`. `support_group` is a
-#: reference field -- without `sysparm_display_value=true` it would come
-#: back as a nested `{"link": ..., "value": ...}` object rather than a flat
-#: display string (the exact bug the ticketing connector's review found).
+#: response (typed error), never a raw `KeyError` -- *except* `support_group`,
+#: whose value may legitimately be `None` (an unassigned support group is a
+#: normal CMDB state, not malformed data; the connector must still be able to
+#: report such a CI so Story 8's orphan-risk detection can see it). It must
+#: still be a present key -- only its *value* being `None` is tolerated.
+#: `support_group` is also a reference field -- without
+#: `sysparm_display_value=true` it would come back as a nested
+#: `{"link": ..., "value": ...}` object rather than a flat display string
+#: (the exact bug the ticketing connector's review found).
 _EXPECTED_RESULT_FIELDS = (
     "name",
     "sys_class_name",
@@ -336,7 +341,9 @@ def _parse_ci_response(
     Raises `CINotFoundError` (404), `AuthenticationError` (401/403),
     `CMDBConnectorError` (any other non-2xx), or `MalformedResponseError`
     (invalid JSON, missing `result`, non-object body, or a missing/`None`
-    expected field) -- never a raw `KeyError`/`json.JSONDecodeError`.
+    expected field -- except `support_group`, which may legitimately be
+    `None`; see `_EXPECTED_RESULT_FIELDS`) -- never a raw
+    `KeyError`/`json.JSONDecodeError`.
     """
     if response.status_code == 404:
         raise CINotFoundError(
@@ -383,11 +390,18 @@ def _parse_ci_response(
     # A required field whose value is `None` is treated the same as an
     # absent key -- a `null` `name`, for example, is just as unusable as a
     # missing `name` and must not silently produce a `RawFact` with a `None`
-    # field value.
+    # field value. `support_group` is deliberately excluded from this
+    # null-rejection: an unassigned support group is a completely normal
+    # real-world CMDB state (not malformed data), and Story 8's orphan-risk
+    # detection depends on this connector being able to report a CI that has
+    # no assigned support group at all, rather than refusing to ingest it.
+    # `support_group` must still be a *present key*, though -- only a `None`
+    # value for it is tolerated.
     missing_fields = [
         key
         for key in _EXPECTED_RESULT_FIELDS
-        if key not in result or result[key] is None
+        if key not in result
+        or (result[key] is None and key != "support_group")
     ]
     if missing_fields:
         # Only the (fixed, known-in-advance) set of missing/null *field
@@ -432,9 +446,11 @@ def cmdb_get_ci_status(
     instance URL is blank or not `https://`, `CINotFoundError` on HTTP 404,
     `AuthenticationError` on HTTP 401/403, `MalformedResponseError` for a 200
     body missing expected fields (a `null` value for a required field counts
-    as missing), that isn't valid JSON, or that contains a non-scalar field
-    value, and `CMDBConnectorError` for any other HTTP failure or
-    network/timeout error.
+    as missing -- except `support_group`, which is allowed to be `null`: an
+    unassigned support group is a normal CMDB state, not malformed data),
+    that isn't valid JSON, or that contains a non-scalar field value, and
+    `CMDBConnectorError` for any other HTTP failure or network/timeout
+    error.
 
     Computes no confidence, staleness, `tier_sla`, or `escalation_owner`
     value -- that is ledger-core's job (AD-5, AD-9), not a connector's, and

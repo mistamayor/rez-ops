@@ -93,3 +93,11 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/7-cmdb-connector-servicenow.md`
   summary: No test or documented behavior for a 3xx redirect response from ServiceNow's Table API.
   evidence: Same category as the calendar connector's existing deferral; falls into the generic error branch today, untested but not obviously wrong.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/8-ownership-inference-and-arbitration.md`
+  summary: `ledger_get_coverage` has no orphan-risk-aware counterpart -- a caller wanting a count of orphan-risk artifacts (not a full listing) must call `list_records(orphan_risk=True)` and count client-side.
+  evidence: `list_records`/`ledger_list_records` already expose the detail view; a counts-only view mirroring the confidence coverage map is a reasonable future addition, not required for orphan-risk to be usable now.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/8-ownership-inference-and-arbitration.md`
+  summary: No documented note that `escalation_owner`'s three possible source fields (CMDB `support_group`, ticketing `assigned_to`, calendar `organizer_email`) carry different identifier formats (a group name, a username, an email address) depending on which source resolved it.
+  evidence: Low risk today since nothing downstream parses `escalation_owner`'s format, only displays/compares it; worth documenting if a future story starts relying on the value's shape.

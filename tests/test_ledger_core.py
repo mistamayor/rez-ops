@@ -12,10 +12,13 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
+from connectors.cmdb.server import cmdb_get_ci_status
 from connectors.git_repo.server import git_get_last_touched
+from connectors.ticketing.server import ticketing_get_ticket_status
 from ledger_core import projection as projection_module
 from ledger_core import server as server_module
 from ledger_core.log import LogFormatError, append_event, read_events
@@ -247,8 +250,11 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
     monkeypatch.setattr(
         server_module,
         "list_records",
-        lambda artifact_type=None, confidence=None: list_records(
-            artifact_type=artifact_type, confidence=confidence, ledger_dir=ledger_dir
+        lambda artifact_type=None, confidence=None, orphan_risk=None: list_records(
+            artifact_type=artifact_type,
+            confidence=confidence,
+            orphan_risk=orphan_risk,
+            ledger_dir=ledger_dir,
         ),
     )
 
@@ -990,7 +996,9 @@ def test_ledger_get_record_tool_reports_last_verified_matching_get_record(
 
 
 async def _call_ledger_list_records(
-    artifact_type: str | None = None, confidence: str | None = None
+    artifact_type: str | None = None,
+    confidence: str | None = None,
+    orphan_risk: bool | None = None,
 ):
     async with create_connected_server_and_client_session(mcp) as client:
         arguments: dict = {}
@@ -998,6 +1006,8 @@ async def _call_ledger_list_records(
             arguments["artifact_type"] = artifact_type
         if confidence is not None:
             arguments["confidence"] = confidence
+        if orphan_risk is not None:
+            arguments["orphan_risk"] = orphan_risk
         return await client.call_tool("ledger_list_records", arguments)
 
 
@@ -1287,6 +1297,71 @@ def test_list_records_filtered_by_artifact_type_and_confidence_together(
     assert records[0].artifact_id == "a2"
 
 
+def test_list_records_filtered_by_artifact_type_confidence_and_orphan_risk_together(
+    ledger_dir: Path,
+) -> None:
+    """All three `list_records` filters combine as an AND, not just any two
+    of them at once (the docstrings claim a full three-way AND, but until
+    this test only artifact_type+confidence was ever exercised together).
+    """
+    # Matches all three filters: type_a, agent-verified, orphan-risk (known
+    # but unowned -- has facts, no ownership signal among them).
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="matches",
+            source="synthetic:test",
+            fields={"author": "someone@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    # Same artifact_type and confidence, but resolved (not orphan-risk) --
+    # must be excluded by the orphan_risk filter.
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="owned",
+            source="synthetic:test",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    # Same artifact_type and orphan-risk shape, but "unknown" confidence
+    # (empty fields) -- never orphan-risk and wrong confidence; must be
+    # excluded by both the confidence and orphan_risk filters.
+    append_event(
+        RawFact(
+            artifact_type="type_a",
+            artifact_id="unknown_conf",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    # Same confidence and orphan-risk shape as the match, but a different
+    # artifact_type -- must be excluded by the artifact_type filter.
+    append_event(
+        RawFact(
+            artifact_type="type_b",
+            artifact_id="wrong_type",
+            source="synthetic:test",
+            fields={"author": "someone-else@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(
+        artifact_type="type_a",
+        confidence="agent-verified",
+        orphan_risk=True,
+        ledger_dir=ledger_dir,
+    )
+
+    assert len(records) == 1
+    assert records[0].artifact_type == "type_a"
+    assert records[0].artifact_id == "matches"
+
+
 # --- ledger_list_records tool: matches list_records end-to-end ------------
 
 
@@ -1518,3 +1593,575 @@ def test_list_records_reads_each_of_n_distinct_artifact_types_exactly_once(
     # Exactly one read per distinct artifact_type (3), never one per
     # artifact_id (6) and never a re-read of any type already scanned.
     assert call_count == 3
+
+
+# ===========================================================================
+# Story 8: ownership inference and arbitration
+# ===========================================================================
+
+
+# --- I/O matrix row: single ownership signal (support_group only) ---------
+
+
+def test_escalation_owner_resolves_from_support_group_alone(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+
+    assert record.escalation_owner == "DR Platform Engineering"
+
+
+# --- I/O matrix row: single lower-priority signal (assigned_to only) ------
+
+
+def test_escalation_owner_resolves_from_assigned_to_alone(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"assigned_to": "jane.doe"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+
+    assert record.escalation_owner == "jane.doe"
+
+
+def test_escalation_owner_resolves_from_organizer_email_alone(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"organizer_email": "owner@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+
+    assert record.escalation_owner == "owner@example.com"
+
+
+# --- I/O matrix row: blank-string field falls through, not "resolved" ------
+
+
+def test_escalation_owner_blank_assigned_to_falls_through_to_organizer_email(
+    ledger_dir: Path,
+) -> None:
+    """A real ServiceNow reference field left unassigned commonly renders as
+    `""`, not `null`, even with `sysparm_display_value=true` -- and neither
+    connector rejects an empty string as a required-field value. A blank
+    `assigned_to` must not resolve as a valid (blank) owner; it must fall
+    through to the next-priority field exactly as a missing/`None` value
+    would.
+    """
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"assigned_to": "", "organizer_email": "owner@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+
+    assert record.escalation_owner == "owner@example.com"
+
+
+def test_escalation_owner_all_blank_fields_resolves_to_none_and_is_orphan_risk(
+    ledger_dir: Path,
+) -> None:
+    """When every priority field is blank (not merely absent), the artifact
+    is genuinely "known but unowned": `escalation_owner` resolves to `None`
+    and the record is orphan-risk -- the exact "known but unowned" case this
+    story exists to detect, and the one the bug this test guards against
+    would have wrongly excluded.
+    """
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"support_group": "", "assigned_to": "   "},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    assert record.escalation_owner is None
+
+    orphan_records = list_records(orphan_risk=True, ledger_dir=ledger_dir)
+    assert len(orphan_records) == 1
+    assert orphan_records[0].artifact_id == "x1"
+
+
+def test_escalation_owner_ignores_non_string_scalar_value(
+    ledger_dir: Path,
+) -> None:
+    """A non-string scalar (e.g. an int/float/bool that reached `fields`)
+    must never be returned as `escalation_owner`, which is always a string
+    or `None` -- guards the bonus edge case a reviewer flagged alongside the
+    main blank-string bug.
+    """
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"support_group": True, "organizer_email": "owner@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+
+    assert record.escalation_owner == "owner@example.com"
+
+
+# --- I/O matrix row: multiple signals, priority wins -----------------------
+
+
+def test_escalation_owner_prefers_support_group_over_assigned_to(
+    ledger_dir: Path,
+) -> None:
+    # Two separate facts, as if a CMDB fact and a ticketing fact were both
+    # ingested for the same artifact -- neither overwrites the other's field
+    # in `fields`, they both fold into the same cumulative dict.
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="servicenow:cmdb",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="servicenow:ticketing",
+            fields={"assigned_to": "jane.doe"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+
+    assert record.escalation_owner == "DR Platform Engineering"
+    # The lower-priority signal remains visible in `fields`, not discarded.
+    assert record.fields["assigned_to"] == "jane.doe"
+
+
+# --- I/O matrix row: all three signals present ------------------------------
+
+
+def test_escalation_owner_prefers_support_group_when_all_three_signals_present(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={
+                "support_group": "DR Platform Engineering",
+                "assigned_to": "jane.doe",
+                "organizer_email": "owner@example.com",
+            },
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+
+    assert record.escalation_owner == "DR Platform Engineering"
+    assert record.fields["assigned_to"] == "jane.doe"
+    assert record.fields["organizer_email"] == "owner@example.com"
+
+
+# --- I/O matrix row: no ownership signal, but other facts exist -----------
+
+
+def test_no_ownership_signal_but_other_facts_exist_is_orphan_risk(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="git:local",
+            fields={"author": "someone@example.com", "commit_sha": "abc123"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    assert record.escalation_owner is None
+
+    orphan_records = list_records(orphan_risk=True, ledger_dir=ledger_dir)
+    assert len(orphan_records) == 1
+    assert orphan_records[0].artifact_id == "x1"
+
+
+# --- I/O matrix row: never observed -----------------------------------------
+
+
+def test_never_observed_artifact_has_no_owner_and_is_not_orphan_risk(
+    ledger_dir: Path,
+) -> None:
+    record = get_record("test_artifact", "never-ingested", ledger_dir=ledger_dir)
+    assert record.escalation_owner is None
+    assert record.fields == {}
+
+    # Not orphan-risk: "never observed" != "known but unowned".
+    orphan_records = list_records(orphan_risk=True, ledger_dir=ledger_dir)
+    assert orphan_records == []
+
+
+def test_fields_ingested_empty_is_not_orphan_risk(ledger_dir: Path) -> None:
+    """Mirrors Story 3's `fields={}` edge case: an artifact with a fact
+    recorded but an empty `fields` payload is treated the same as "never
+    observed" by `_compute_confidence` -- orphan-risk must agree.
+    """
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    orphan_records = list_records(orphan_risk=True, ledger_dir=ledger_dir)
+    assert orphan_records == []
+
+
+# --- I/O matrix row: resolved artifact excluded from orphan-risk -----------
+
+
+def test_resolved_artifact_excluded_from_orphan_risk_filter(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="owned",
+            source="synthetic:test",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="unowned",
+            source="synthetic:test",
+            fields={"author": "someone@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    orphan_records = list_records(orphan_risk=True, ledger_dir=ledger_dir)
+
+    assert len(orphan_records) == 1
+    assert orphan_records[0].artifact_id == "unowned"
+
+    # The inverse filter, `orphan_risk=False`, returns exactly the resolved
+    # one instead.
+    resolved_records = list_records(orphan_risk=False, ledger_dir=ledger_dir)
+    assert len(resolved_records) == 1
+    assert resolved_records[0].artifact_id == "owned"
+
+
+# --- I/O matrix row: no orphans at all --------------------------------------
+
+
+def test_orphan_risk_filter_returns_empty_list_when_no_orphans_exist(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    orphan_records = list_records(orphan_risk=True, ledger_dir=ledger_dir)
+
+    assert orphan_records == []
+
+
+def test_orphan_risk_filter_returns_empty_list_when_ledger_dir_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    missing_dir = tmp_path / "does_not_exist"
+    assert not missing_dir.exists()
+
+    assert list_records(orphan_risk=True, ledger_dir=missing_dir) == []
+
+
+def test_orphan_risk_filter_returns_empty_list_when_log_file_exists_but_has_no_events(
+    ledger_dir: Path,
+) -> None:
+    """Distinct from the `ledger_dir` doesn't exist case above: here the
+    artifact-type log file itself exists (and so is discovered as a real
+    artifact type) but is empty, meaning zero events fold into zero
+    artifact_ids -- there is simply nothing to classify as orphan-risk or
+    not, for either value of the filter.
+    """
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "test_artifact.log.md").write_text("", encoding="utf-8")
+
+    assert list_records(orphan_risk=True, ledger_dir=ledger_dir) == []
+    assert list_records(orphan_risk=False, ledger_dir=ledger_dir) == []
+
+
+# --- LogFormatError sentinel bypasses the orphan_risk filter ---------------
+
+
+def test_orphan_risk_filter_still_surfaces_corrupted_type_sentinel(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+    append_event(
+        RawFact(
+            artifact_type="healthy_type",
+            artifact_id="h1",
+            source="synthetic:test",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(orphan_risk=True, ledger_dir=ledger_dir)
+
+    # The healthy artifact has a resolved owner, so it's excluded by
+    # orphan_risk=True -- but the sentinel is never filterable away.
+    assert len(records) == 1
+    assert records[0].artifact_id == LOG_FORMAT_ERROR_ARTIFACT_ID
+
+
+# --- Acceptance criterion: escalation_owner + fields both visible via -----
+# ------------------------------------------------- ledger_get_record tool --
+
+
+def test_ledger_get_record_tool_reports_escalation_owner_with_assigned_to_still_in_fields(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="servicenow:cmdb",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="servicenow:ticketing",
+            fields={"assigned_to": "jane.doe"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_get_record("test_artifact", "x1"))
+
+    assert result.isError is False
+    assert result.structuredContent["escalation_owner"] == "DR Platform Engineering"
+    assert result.structuredContent["fields"]["assigned_to"] == "jane.doe"
+
+
+# --- Acceptance criterion: ledger_list_records(orphan_risk=True) tool -----
+
+
+def test_ledger_list_records_tool_orphan_risk_filter_matches_list_records(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="owned",
+            source="synthetic:test",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="unowned",
+            source="synthetic:test",
+            fields={"author": "someone@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_records(orphan_risk=True))
+
+    assert result.isError is False
+    records = result.structuredContent["result"]
+    assert len(records) == 1
+    assert records[0]["artifact_id"] == "unowned"
+    assert records[0]["escalation_owner"] is None
+
+
+def test_ledger_list_records_tool_orphan_risk_true_empty_result_never_raises(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="owned",
+            source="synthetic:test",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_records(orphan_risk=True))
+
+    assert result.isError is False
+    assert result.structuredContent == {"result": []}
+
+
+# --- I/O matrix row: end-to-end, real CMDB + ticketing connectors ---------
+
+
+def test_end_to_end_cmdb_and_ticketing_facts_resolve_escalation_owner_to_cmdb(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ingests a *real* CMDB fact and a *real* ticketing fact (via the actual
+    connector tools, against `httpx.MockTransport` -- no live ServiceNow
+    instance is used) for the same artifact, and confirms
+    `escalation_owner` resolves to the CMDB value -- proving the
+    ownership-arbitration wiring end-to-end rather than with synthetic
+    RawFacts.
+    """
+    monkeypatch.setenv("REZOPS_CMDB_INSTANCE_URL", "https://dev12345.service-now.com")
+    monkeypatch.setenv("REZOPS_CMDB_TOKEN", "s3cr3t-cmdb-token")
+    monkeypatch.setenv(
+        "REZOPS_TICKETING_INSTANCE_URL", "https://dev12345.service-now.com"
+    )
+    monkeypatch.setenv("REZOPS_TICKETING_TOKEN", "s3cr3t-ticketing-token")
+
+    def cmdb_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "result": {
+                    "name": "dr-failover-db01",
+                    "sys_class_name": "cmdb_ci_db_instance",
+                    "operational_status": "Operational",
+                    "install_status": "Installed",
+                    "support_group": "DR Platform Engineering",
+                    "sys_updated_on": "2026-08-14 10:15:00",
+                }
+            },
+        )
+
+    def ticketing_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "result": {
+                    "number": "INC0012345",
+                    "state": "2",
+                    "assigned_to": "jane.doe",
+                    "sys_updated_on": "2026-08-14 10:15:00",
+                    "short_description": "Investigate failed DR failover test",
+                }
+            },
+        )
+
+    monkeypatch.setattr(
+        "connectors.cmdb.server._build_client",
+        lambda: httpx.Client(
+            transport=httpx.MockTransport(cmdb_handler), timeout=10.0
+        ),
+    )
+    monkeypatch.setattr(
+        "connectors.ticketing.server._build_client",
+        lambda: httpx.Client(
+            transport=httpx.MockTransport(ticketing_handler), timeout=10.0
+        ),
+    )
+
+    cmdb_fact = cmdb_get_ci_status(
+        table="cmdb_ci_db_instance",
+        sys_id="abc123",
+        artifact_type="test_artifact",
+        artifact_id="e2e-ownership",
+    )
+    ticketing_fact = ticketing_get_ticket_status(
+        table="incident",
+        sys_id="inc123",
+        artifact_type="test_artifact",
+        artifact_id="e2e-ownership",
+    )
+
+    _point_server_at(monkeypatch, ledger_dir)
+
+    cmdb_ingest = asyncio.run(
+        _call_ledger_ingest_raw_fact(
+            cmdb_fact["artifact_type"],
+            cmdb_fact["artifact_id"],
+            cmdb_fact["source"],
+            cmdb_fact["fields"],
+        )
+    )
+    assert cmdb_ingest.isError is False
+
+    ticketing_ingest = asyncio.run(
+        _call_ledger_ingest_raw_fact(
+            ticketing_fact["artifact_type"],
+            ticketing_fact["artifact_id"],
+            ticketing_fact["source"],
+            ticketing_fact["fields"],
+        )
+    )
+    assert ticketing_ingest.isError is False
+
+    record_result = asyncio.run(
+        _call_ledger_get_record("test_artifact", "e2e-ownership")
+    )
+
+    assert record_result.isError is False
+    assert (
+        record_result.structuredContent["escalation_owner"]
+        == "DR Platform Engineering"
+    )
+    assert record_result.structuredContent["fields"]["assigned_to"] == "jane.doe"

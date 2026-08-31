@@ -40,6 +40,54 @@ LOG_FORMAT_ERROR_MARKER = "error:log_format_error"
 LOG_FORMAT_ERROR_ARTIFACT_ID = "_log_format_error"
 
 
+#: Fixed field-priority order `_compute_escalation_owner` resolves against
+#: (AD-10, CAP-5, Story 8). Ordered most- to least-authoritative:
+#: `support_group` (CMDB -- the canonical "who supports this system" record),
+#: `assigned_to` (ticketing -- who's handling an active issue, may be
+#: transient), `organizer_email` (calendar -- weakest signal, just who
+#: scheduled a meeting). Git's `author` is deliberately excluded: it means
+#: "who last touched this," not "who owns this." This is a fixed constant
+#: for the four real connectors' actual field names, not a
+#: configurable/pluggable priority system -- see the story's Design Notes for
+#: the rationale and its explicitly judgment-call nature.
+_OWNERSHIP_FIELD_PRIORITY = ("support_group", "assigned_to", "organizer_email")
+
+
+def _compute_escalation_owner(fields: dict[str, Any]) -> str | None:
+    """Resolve `escalation_owner` from the fixed field-priority order (AD-10).
+
+    Returns the value of the first field in `_OWNERSHIP_FIELD_PRIORITY` that
+    is present in `fields` with a *non-blank string* value; `None` if none of
+    the three fields carries one. A lower-priority field is never deleted or
+    hidden from `fields` just because a higher-priority one won -- this only
+    decides which single value becomes `escalation_owner`.
+
+    A value counts as present only if it is a `str` that is non-empty after
+    stripping whitespace (`isinstance(value, str) and value.strip()`) --
+    checking mere key presence, or even `is not None`, is not enough:
+
+    - `organizer_email`: the calendar connector's `_flatten_organizer_field`
+      always includes that key in `fields`, with a `None` value when the
+      event genuinely has no organizer -- key presence alone would wrongly
+      treat that as a resolved ownership signal.
+    - `assigned_to`/`support_group`: real ServiceNow reference fields --
+      even with `sysparm_display_value=true` -- commonly render an
+      unassigned field as `""` rather than `null`, and neither connector
+      rejects an empty string as a required-field value. Treating `""` as a
+      resolved owner would wrongly mark a genuinely unowned artifact as
+      owned, defeating orphan-risk detection. A blank string falls through
+      to the next-priority field exactly as a `None`/missing value would.
+    - Any non-string scalar (e.g. an int/float/bool that slipped through as
+      a field value) is likewise never returned as `escalation_owner`, which
+      must always be a string or `None`.
+    """
+    for field_name in _OWNERSHIP_FIELD_PRIORITY:
+        value = fields.get(field_name)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def _compute_confidence(fields: dict[str, Any]) -> str:
     """The first real, intentionally simple confidence rule (AD-5).
 
@@ -119,9 +167,16 @@ def get_record(
     supply a custom timestamp. Only tests can construct an out-of-order
     history, via `append_event`'s optional `timestamp` override.
 
-    `verification_method`, `expiry_rule`, `tier_sla`, and `escalation_owner`
-    are intentionally always `None` on every record this story produces --
-    no tiering/ownership data source exists yet.
+    `escalation_owner` is computed exclusively here too (AD-10, Story 8),
+    from the fixed `_OWNERSHIP_FIELD_PRIORITY` order over these same folded
+    `fields` -- never accepted as input, never set by a connector. `None` if
+    none of the three priority fields carries a non-blank string value (see
+    `_compute_escalation_owner`), including for an artifact_id with no
+    recorded facts at all.
+
+    `verification_method`, `expiry_rule`, and `tier_sla` are intentionally
+    always `None` on every record this story produces -- no tiering data
+    source exists yet.
     """
     by_artifact, last_verified_by_artifact = _fold_events_by_artifact(
         artifact_type, ledger_dir=ledger_dir
@@ -134,6 +189,7 @@ def get_record(
         artifact_id=artifact_id,
         fields=fields,
         last_verified=last_verified,
+        escalation_owner=_compute_escalation_owner(fields),
         confidence=_compute_confidence(fields),
     )
 
@@ -230,6 +286,7 @@ def _discover_artifact_types(ledger_dir: Path) -> list[str]:
 def list_records(
     artifact_type: str | None = None,
     confidence: str | None = None,
+    orphan_risk: bool | None = None,
     *,
     ledger_dir: Path = DEFAULT_LEDGER_DATA_DIR,
 ) -> list[LedgerRecord]:
@@ -249,7 +306,14 @@ def list_records(
     (`_discover_artifact_types`). `confidence`, if given, filters the
     resulting real records to that exact value, computed with the same
     `_compute_confidence` rule every other read path uses -- never a
-    parallel reimplementation.
+    parallel reimplementation. `orphan_risk`, if given, filters to records
+    where `fields` is non-empty AND `escalation_owner` is `None` (when
+    `True`), or the inverse -- `fields` empty OR `escalation_owner` resolved
+    (when `False`) -- computed with the same `_compute_escalation_owner`
+    rule `get_record` uses (AD-10, Story 8). An artifact never observed at
+    all (`fields` entirely empty) is never orphan-risk -- orphan-risk means
+    "known but unowned," not "unknown." `artifact_type`, `confidence`, and
+    `orphan_risk` combine as an AND across all given filters.
 
     Reuses the same single-pass fold (`_fold_events_by_artifact`) as
     `get_record`/`get_coverage_map` -- one log read per artifact type, never
@@ -264,17 +328,18 @@ def list_records(
     isolates only its own type, but must never be indistinguishable from
     "no artifacts of this type exist"). That sentinel's `confidence` isn't
     a real classification of any folded fact, so it is always included
-    regardless of the `confidence` filter -- an error signal must not be
-    filterable away. Never raises. Returns an empty list if `ledger_dir`
-    doesn't exist, isn't a directory, holds no matching artifact-type logs,
-    or no record matches the given filters.
+    regardless of the `confidence` or `orphan_risk` filter -- an error
+    signal must not be filterable away. Never raises. Returns an empty list
+    if `ledger_dir` doesn't exist, isn't a directory, holds no matching
+    artifact-type logs, or no record matches the given filters.
 
     `last_verified`, like `get_record`'s, reflects append order, which
     matches true chronological order for every real ingestion path (only
     tests can construct an out-of-order history via `append_event`'s
-    timestamp override). `verification_method`, `expiry_rule`, `tier_sla`,
-    and `escalation_owner` are intentionally always `None` on every record
-    this story produces -- no tiering/ownership data source exists yet.
+    timestamp override). `verification_method`, `expiry_rule`, and
+    `tier_sla` are intentionally always `None` on every record this story
+    produces -- no tiering data source exists yet. `escalation_owner` is
+    computed per record via `_compute_escalation_owner` (AD-10, Story 8).
     """
     if artifact_type is not None:
         if _is_excluded_artifact_type_name(artifact_type):
@@ -305,12 +370,20 @@ def list_records(
             record_confidence = _compute_confidence(fields)
             if confidence is not None and record_confidence != confidence:
                 continue
+            escalation_owner = _compute_escalation_owner(fields)
+            # Orphan-risk: known (non-empty `fields`) but unowned (no
+            # resolved `escalation_owner`). An artifact never observed at
+            # all is never orphan-risk -- see docstring.
+            record_is_orphan_risk = bool(fields) and escalation_owner is None
+            if orphan_risk is not None and record_is_orphan_risk != orphan_risk:
+                continue
             records.append(
                 LedgerRecord(
                     artifact_type=a_type,
                     artifact_id=artifact_id,
                     fields=fields,
                     last_verified=last_verified_by_artifact.get(artifact_id),
+                    escalation_owner=escalation_owner,
                     confidence=record_confidence,
                 )
             )

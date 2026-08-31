@@ -781,6 +781,36 @@ def test_response_with_null_expected_field_does_not_leak_unrelated_field_value(
     assert sensitive_marker not in str(exc_info.value)
 
 
+def test_response_with_null_support_group_succeeds_ingesting_unassigned_ci(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`support_group` is the one required field allowed to be `None`: an
+    unassigned support group is a normal, real-world CMDB state -- not
+    malformed data -- and the connector must still successfully ingest such
+    a CI (Story 8's orphan-risk detection depends on being able to see it),
+    rather than raising `MalformedResponseError` the way every other `None`
+    required field does.
+    """
+    record = _realistic_record(support_group=None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"result": record})
+
+    monkeypatch.setattr(
+        "connectors.cmdb.server._build_client", lambda: _mock_client(handler)
+    )
+
+    result = cmdb_get_ci_status(
+        table="cmdb_ci_db_instance",
+        sys_id="abc123",
+        artifact_type="test_artifact",
+        artifact_id="x1",
+    )
+
+    assert result["fields"]["support_group"] is None
+    assert result["fields"]["name"] == "dr-failover-db01"
+
+
 def test_response_missing_result_envelope_raises_malformed_response_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
