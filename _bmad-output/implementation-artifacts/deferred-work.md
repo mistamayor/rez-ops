@@ -101,3 +101,19 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/8-ownership-inference-and-arbitration.md`
   summary: No documented note that `escalation_owner`'s three possible source fields (CMDB `support_group`, ticketing `assigned_to`, calendar `organizer_email`) carry different identifier formats (a group name, a username, an email address) depending on which source resolved it.
   evidence: Low risk today since nothing downstream parses `escalation_owner`'s format, only displays/compares it; worth documenting if a future story starts relying on the value's shape.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/9-draft-not-send-outbound-content.md`
+  summary: No charset/enum restriction on `draft_type` beyond corruption-safety escaping -- a typo silently creates a new, never-matching category rather than surfacing the mistake.
+  evidence: Low real-world impact since draft_type is caller-chosen categorical text with only one caller (this system itself) so far; revisit if draft_type values proliferate or come from less-trusted input.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/9-draft-not-send-outbound-content.md`
+  summary: `create_draft` doesn't check that `artifact_type`/`artifact_id` correspond to any artifact the ledger actually knows about -- only the identifier charset is validated.
+  evidence: Consistent with the rest of the system's philosophy (RawFact ingestion doesn't validate artifact existence either, by design); a typo'd reference is indistinguishable from a legitimate orphan-risk artifact today.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/9-draft-not-send-outbound-content.md`
+  summary: No tool to fetch a single draft by its `draft_id` -- callers wanting to re-check a specific draft must filter `list_drafts` client-side with no uniqueness guarantee.
+  evidence: `list_drafts`'s existing filters (artifact_type/artifact_id/draft_type) cover retrieval reasonably for v1; a get-by-id tool is a reasonable future addition, not required now.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/9-draft-not-send-outbound-content.md`
+  summary: No pagination or size limit on `list_drafts`/`ledger_list_drafts` -- same category as the existing coverage/list_records pagination deferrals.
+  evidence: Fine at current scale; revisit alongside the other pagination deferrals once real draft volume grows.

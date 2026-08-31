@@ -1,13 +1,17 @@
 """Ledger-core MCP server (AD-1, AD-2): ledger-core is its own MCP server.
 
-Exposes four tools: a read/query surface over projection.py
-(`ledger_get_record`, `ledger_get_coverage`, `ledger_list_records`), and the
-one and only ingestion path into the append-only log
-(`ledger_ingest_raw_fact`). Ledger state can only ever be changed by
-appending to the log (AD-3) -- `ledger_ingest_raw_fact` constructs a
-`RawFact` and calls `append_event`; it has no other side effect and no
-`confidence` parameter (confidence is computed exclusively by
-`projection.get_record`, AD-5).
+Exposes six tools: a read/query surface over projection.py
+(`ledger_get_record`, `ledger_get_coverage`, `ledger_list_records`), the one
+and only ingestion path into the append-only log (`ledger_ingest_raw_fact`),
+and the draft-not-send outbound content queue over drafts.py
+(`ledger_create_draft`, `ledger_list_drafts` -- AD-6, CAP-6, Story 9). Ledger
+state can only ever be changed by appending to the log (AD-3) --
+`ledger_ingest_raw_fact` constructs a `RawFact` and calls `append_event`; it
+has no other side effect and no `confidence` parameter (confidence is
+computed exclusively by `projection.get_record`, AD-5). `ledger_create_draft`
+is the only other tool with a write side effect -- it writes exactly one new
+file under `ledger_data/drafts/` and calls no external send/write API of any
+kind (AD-6).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from ledger_core.drafts import Draft, create_draft, list_drafts
 from ledger_core.log import append_event
 from ledger_core.projection import get_coverage_map, get_record, list_records
 from shared.ledger_schema import RawFact
@@ -155,6 +160,89 @@ def ledger_list_records(
         }
         for record in records
     ]
+
+
+def _draft_to_dict(draft: Draft) -> dict[str, Any]:
+    return {
+        "draft_id": draft.draft_id,
+        "artifact_type": draft.artifact_type,
+        "artifact_id": draft.artifact_id,
+        "draft_type": draft.draft_type,
+        "subject": draft.subject,
+        "body": draft.body,
+        "recipient": draft.recipient,
+        "created_at": draft.created_at,
+    }
+
+
+@mcp.tool(name="ledger_create_draft")
+def ledger_create_draft(
+    artifact_type: str,
+    artifact_id: str,
+    draft_type: str,
+    subject: str,
+    body: str,
+    recipient: str | None = None,
+) -> dict[str, Any]:
+    """Create one draft of outbound content and write it to `ledger_data/drafts/`.
+
+    The only side effect is writing exactly one new git-tracked markdown
+    file, `ledger_data/drafts/{draft_id}.md` -- `draft_id` is always
+    generated here (a sortable UTC timestamp plus a short random suffix),
+    never accepted from the caller. Never calls an external send/write API
+    of any kind (no email, Slack, HTTP, or other outbound call) -- sending is
+    a manual, human-initiated action entirely outside this system in v1
+    (AD-6). This story adds no update/delete tool: creation is the only
+    mutation a draft ever undergoes.
+
+    `artifact_type`/`artifact_id` are validated against the same identifier
+    charset every other component in this project already enforces.
+    `draft_type`/`subject`/`body` must each be non-empty and
+    non-whitespace-only. All five raise a typed, non-crashing MCP error
+    (surfaced by the mcp SDK's own tool-call handling, the same mechanism
+    proven for every other tool here) and write nothing if invalid.
+
+    If `recipient` is omitted, defaults to the artifact's current
+    `escalation_owner` (via `ledger_core.projection.get_record`, Story 8). If
+    that's unresolved too -- an orphan-risk artifact, or one never observed
+    at all -- `recipient` stays unset (`None`) in the created draft rather
+    than being guessed at; that's the honest behavior for exactly the case
+    this tool exists to surface. No other heuristic ever guesses a
+    recipient. `subject`/`body` content is never validated, inspected, or
+    templated beyond the non-blank check -- they're opaque text the caller
+    supplies.
+    """
+    draft = create_draft(
+        artifact_type=artifact_type,
+        artifact_id=artifact_id,
+        draft_type=draft_type,
+        subject=subject,
+        body=body,
+        recipient=recipient,
+    )
+    return _draft_to_dict(draft)
+
+
+@mcp.tool(name="ledger_list_drafts")
+def ledger_list_drafts(
+    artifact_type: str | None = None,
+    artifact_id: str | None = None,
+    draft_type: str | None = None,
+) -> list[dict[str, Any]]:
+    """List every draft under `ledger_data/drafts/`, optionally filtered.
+
+    Read-only: never mutates a draft file. `artifact_type`, `artifact_id`,
+    and `draft_type` combine as an AND across whichever are given; an
+    omitted filter doesn't restrict the result. Returns `[]` -- never
+    raises -- when `ledger_data/drafts/` doesn't exist yet (no draft has
+    ever been created) or no draft matches the given filters.
+    """
+    drafts = list_drafts(
+        artifact_type=artifact_type,
+        artifact_id=artifact_id,
+        draft_type=draft_type,
+    )
+    return [_draft_to_dict(draft) for draft in drafts]
 
 
 def main() -> None:

@@ -21,6 +21,14 @@ from connectors.git_repo.server import git_get_last_touched
 from connectors.ticketing.server import ticketing_get_ticket_status
 from ledger_core import projection as projection_module
 from ledger_core import server as server_module
+from ledger_core.drafts import (
+    DRAFT_FORMAT_ERROR_MARKER,
+    Draft,
+    DraftFileFormatError,
+    DraftValidationError,
+    create_draft,
+    list_drafts,
+)
 from ledger_core.log import LogFormatError, append_event, read_events
 from ledger_core.projection import (
     LOG_FORMAT_ERROR_ARTIFACT_ID,
@@ -204,10 +212,13 @@ def test_ledger_record_rejects_invalid_confidence_value() -> None:
 # --- Acceptance: MCP server exposes exactly one read tool -----------------
 
 
-def test_server_exposes_exactly_four_tools_none_writing_outside_the_log() -> None:
-    """Acceptance criterion: a client listing tools sees exactly four, and
-    (by construction -- see the ingestion/coverage/list tests below) none of
-    them writes anywhere outside the append-only log.
+def test_server_exposes_exactly_six_tools_none_calling_an_external_send_api() -> None:
+    """Acceptance criterion (Story 9): a client listing tools sees
+    `ledger_create_draft` and `ledger_list_drafts` alongside the four
+    existing tools, and (by construction -- see the ingestion/coverage/list/
+    draft tests below, and `ledger_core/drafts.py`'s complete absence of any
+    `httpx`/network import) neither `ledger_create_draft` nor any other tool
+    calls an external send API.
     """
     tools = asyncio.run(mcp.list_tools())
     names = [tool.name for tool in tools]
@@ -216,6 +227,8 @@ def test_server_exposes_exactly_four_tools_none_writing_outside_the_log() -> Non
         "ledger_ingest_raw_fact",
         "ledger_get_coverage",
         "ledger_list_records",
+        "ledger_create_draft",
+        "ledger_list_drafts",
     ]
 
 
@@ -254,6 +267,29 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
             artifact_type=artifact_type,
             confidence=confidence,
             orphan_risk=orphan_risk,
+            ledger_dir=ledger_dir,
+        ),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "create_draft",
+        lambda artifact_type, artifact_id, draft_type, subject, body, recipient=None: create_draft(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            draft_type=draft_type,
+            subject=subject,
+            body=body,
+            recipient=recipient,
+            ledger_dir=ledger_dir,
+        ),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "list_drafts",
+        lambda artifact_type=None, artifact_id=None, draft_type=None: list_drafts(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            draft_type=draft_type,
             ledger_dir=ledger_dir,
         ),
     )
@@ -2165,3 +2201,940 @@ def test_end_to_end_cmdb_and_ticketing_facts_resolve_escalation_owner_to_cmdb(
         == "DR Platform Engineering"
     )
     assert record_result.structuredContent["fields"]["assigned_to"] == "jane.doe"
+
+
+# ===========================================================================
+# Story 9: draft-not-send outbound content
+# ===========================================================================
+
+
+# --- I/O matrix row: explicit recipient given -------------------------------
+
+
+def test_create_draft_with_explicit_recipient_is_unchanged(ledger_dir: Path) -> None:
+    draft = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="Please reconfirm ownership of sys01",
+        body="Hi -- can you confirm you still own this system?",
+        recipient="jane.doe@example.com",
+        ledger_dir=ledger_dir,
+    )
+
+    assert draft.recipient == "jane.doe@example.com"
+    path = ledger_dir / "drafts" / f"{draft.draft_id}.md"
+    assert path.exists()
+    text = path.read_text(encoding="utf-8")
+    assert "recipient: jane.doe@example.com" in text
+    assert "artifact_type: bia" in text
+    assert "artifact_id: sys01" in text
+    assert "draft_type: owner_reconfirmation" in text
+    assert "Please reconfirm ownership of sys01" in text
+    assert "Hi -- can you confirm you still own this system?" in text
+
+
+# --- I/O matrix row: no recipient, artifact has a resolved owner -----------
+
+
+def test_create_draft_no_recipient_defaults_to_resolved_escalation_owner(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    draft = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="Please reconfirm ownership of sys01",
+        body="Hi -- can you confirm you still own this system?",
+        ledger_dir=ledger_dir,
+    )
+
+    assert draft.recipient == "DR Platform Engineering"
+
+
+# --- I/O matrix row: no recipient, artifact is orphan-risk -----------------
+
+
+def test_create_draft_no_recipient_orphan_risk_artifact_stays_unset_but_creates(
+    ledger_dir: Path,
+) -> None:
+    """The exact case this feature exists to surface: an unresolved owner
+    must never be guessed at, but the draft is still created, not blocked.
+    """
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys02",
+            source="git:local",
+            fields={"author": "someone@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    draft = create_draft(
+        artifact_type="bia",
+        artifact_id="sys02",
+        draft_type="owner_reconfirmation",
+        subject="Who owns sys02?",
+        body="No resolved owner was found for this artifact.",
+        ledger_dir=ledger_dir,
+    )
+
+    assert draft.recipient is None
+    path = ledger_dir / "drafts" / f"{draft.draft_id}.md"
+    assert path.exists()
+
+    # Also true for an artifact never observed at all (never ingested).
+    never_observed_draft = create_draft(
+        artifact_type="bia",
+        artifact_id="never-ingested",
+        draft_type="owner_reconfirmation",
+        subject="Who owns this?",
+        body="No facts at all exist for this artifact.",
+        ledger_dir=ledger_dir,
+    )
+    assert never_observed_draft.recipient is None
+
+
+# --- I/O matrix row: list, no filters ---------------------------------------
+
+
+def test_list_drafts_no_filters_returns_every_draft(ledger_dir: Path) -> None:
+    first = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="subject one",
+        body="body one",
+        recipient="a@example.com",
+        ledger_dir=ledger_dir,
+    )
+    second = create_draft(
+        artifact_type="tiering",
+        artifact_id="sys02",
+        draft_type="tier_review",
+        subject="subject two",
+        body="body two",
+        recipient="b@example.com",
+        ledger_dir=ledger_dir,
+    )
+
+    drafts = list_drafts(ledger_dir=ledger_dir)
+
+    seen_ids = {draft.draft_id for draft in drafts}
+    assert seen_ids == {first.draft_id, second.draft_id}
+
+
+# --- I/O matrix row: list filtered by artifact_type/artifact_id ------------
+
+
+def test_list_drafts_filtered_by_artifact_type_and_artifact_id(
+    ledger_dir: Path,
+) -> None:
+    target = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="subject one",
+        body="body one",
+        ledger_dir=ledger_dir,
+    )
+    create_draft(
+        artifact_type="bia",
+        artifact_id="sys02",
+        draft_type="owner_reconfirmation",
+        subject="subject two",
+        body="body two",
+        ledger_dir=ledger_dir,
+    )
+    create_draft(
+        artifact_type="tiering",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="subject three",
+        body="body three",
+        ledger_dir=ledger_dir,
+    )
+
+    by_type = list_drafts(artifact_type="bia", ledger_dir=ledger_dir)
+    assert len(by_type) == 2
+    assert all(d.artifact_type == "bia" for d in by_type)
+
+    by_artifact_id = list_drafts(artifact_id="sys01", ledger_dir=ledger_dir)
+    assert len(by_artifact_id) == 2
+    assert all(d.artifact_id == "sys01" for d in by_artifact_id)
+
+    by_both = list_drafts(
+        artifact_type="bia", artifact_id="sys01", ledger_dir=ledger_dir
+    )
+    assert len(by_both) == 1
+    assert by_both[0].draft_id == target.draft_id
+
+
+# --- I/O matrix row: list filtered by draft_type ----------------------------
+
+
+def test_list_drafts_filtered_by_draft_type(ledger_dir: Path) -> None:
+    target = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="subject one",
+        body="body one",
+        ledger_dir=ledger_dir,
+    )
+    create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="tier_review",
+        subject="subject two",
+        body="body two",
+        ledger_dir=ledger_dir,
+    )
+
+    drafts = list_drafts(draft_type="owner_reconfirmation", ledger_dir=ledger_dir)
+
+    assert len(drafts) == 1
+    assert drafts[0].draft_id == target.draft_id
+    assert drafts[0].draft_type == "owner_reconfirmation"
+
+
+# --- I/O matrix row: no drafts yet -------------------------------------------
+
+
+def test_list_drafts_returns_empty_when_drafts_dir_does_not_exist(
+    ledger_dir: Path,
+) -> None:
+    assert not (ledger_dir / "drafts").exists()
+
+    assert list_drafts(ledger_dir=ledger_dir) == []
+
+
+def test_list_drafts_returns_empty_when_ledger_dir_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    missing_dir = tmp_path / "does_not_exist"
+    assert not missing_dir.exists()
+
+    assert list_drafts(ledger_dir=missing_dir) == []
+
+
+# --- I/O matrix row: empty/whitespace required field ------------------------
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["artifact_type", "artifact_id", "draft_type", "subject", "body"],
+)
+@pytest.mark.parametrize("bad_value", ["", "   "])
+def test_create_draft_rejects_empty_or_whitespace_required_field(
+    ledger_dir: Path, field_name: str, bad_value: str
+) -> None:
+    kwargs = {
+        "artifact_type": "bia",
+        "artifact_id": "sys01",
+        "draft_type": "owner_reconfirmation",
+        "subject": "subject",
+        "body": "body",
+        "ledger_dir": ledger_dir,
+    }
+    kwargs[field_name] = bad_value
+
+    with pytest.raises(DraftValidationError):
+        create_draft(**kwargs)
+
+    # Nothing was written as a result of the rejected creation.
+    assert list_drafts(ledger_dir=ledger_dir) == []
+
+
+def test_create_draft_rejects_invalid_charset_in_artifact_identifiers(
+    ledger_dir: Path,
+) -> None:
+    with pytest.raises(DraftValidationError):
+        create_draft(
+            artifact_type="bad/type",
+            artifact_id="sys01",
+            draft_type="owner_reconfirmation",
+            subject="subject",
+            body="body",
+            ledger_dir=ledger_dir,
+        )
+
+    assert list_drafts(ledger_dir=ledger_dir) == []
+
+
+# --- I/O matrix row: concurrent-ish creation, no collision ------------------
+
+
+def test_two_drafts_created_in_quick_succession_both_persist_as_distinct_files(
+    ledger_dir: Path,
+) -> None:
+    first = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="first",
+        body="first body",
+        ledger_dir=ledger_dir,
+    )
+    second = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="second",
+        body="second body",
+        ledger_dir=ledger_dir,
+    )
+
+    assert first.draft_id != second.draft_id
+    drafts_dir = ledger_dir / "drafts"
+    assert (drafts_dir / f"{first.draft_id}.md").exists()
+    assert (drafts_dir / f"{second.draft_id}.md").exists()
+
+    drafts = list_drafts(ledger_dir=ledger_dir)
+    assert len(drafts) == 2
+    assert {d.subject for d in drafts} == {"first", "second"}
+
+
+def test_create_draft_id_collision_is_retried_not_overwritten(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forces two consecutive `_generate_draft_id` calls to collide (fixed
+    timestamp, fixed random suffix on the first call) and proves the second
+    `create_draft` call still succeeds with a distinct file rather than
+    silently overwriting the first draft.
+    """
+    import ledger_core.drafts as drafts_module
+
+    fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(drafts_module, "datetime", _FixedDateTime)
+
+    suffixes = iter(["aaaaaa", "aaaaaa", "bbbbbb"])
+    monkeypatch.setattr(
+        drafts_module.secrets, "token_hex", lambda _n: next(suffixes)
+    )
+
+    first = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="first",
+        body="first body",
+        ledger_dir=ledger_dir,
+    )
+    second = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="second",
+        body="second body",
+        ledger_dir=ledger_dir,
+    )
+
+    assert first.draft_id != second.draft_id
+    assert first.draft_id == "20260101T120000Z-aaaaaa"
+    assert second.draft_id == "20260101T120000Z-bbbbbb"
+
+    drafts_dir = ledger_dir / "drafts"
+    assert (drafts_dir / f"{first.draft_id}.md").read_text(
+        encoding="utf-8"
+    ).count("first body") == 1
+    assert (drafts_dir / f"{second.draft_id}.md").read_text(
+        encoding="utf-8"
+    ).count("second body") == 1
+
+
+# --- Fresh read reproduces what create_draft returned ------------------------
+
+
+def test_list_drafts_round_trips_every_field_create_draft_returned(
+    ledger_dir: Path,
+) -> None:
+    created = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="Please reconfirm ownership",
+        body="Line one.\nLine two.",
+        recipient="jane.doe@example.com",
+        ledger_dir=ledger_dir,
+    )
+
+    [read_back] = list_drafts(ledger_dir=ledger_dir)
+
+    assert read_back == created
+
+
+# --- Never a mutation/delete tool: drafts.py exposes only create + list ----
+
+
+def test_drafts_module_exposes_only_create_and_list() -> None:
+    import ledger_core.drafts as drafts_module
+
+    public_callables = {
+        name
+        for name in dir(drafts_module)
+        if not name.startswith("_") and callable(getattr(drafts_module, name))
+    }
+    assert "create_draft" in public_callables
+    assert "list_drafts" in public_callables
+    # No update/delete surface exists.
+    assert not any(
+        name in public_callables
+        for name in ("update_draft", "delete_draft", "edit_draft", "remove_draft")
+    )
+
+
+# --- MCP tool wiring: ledger_create_draft / ledger_list_drafts -------------
+
+
+async def _call_ledger_create_draft(
+    artifact_type: str,
+    artifact_id: str,
+    draft_type: str,
+    subject: str,
+    body: str,
+    recipient: str | None = None,
+):
+    async with create_connected_server_and_client_session(mcp) as client:
+        arguments: dict = {
+            "artifact_type": artifact_type,
+            "artifact_id": artifact_id,
+            "draft_type": draft_type,
+            "subject": subject,
+            "body": body,
+        }
+        if recipient is not None:
+            arguments["recipient"] = recipient
+        return await client.call_tool("ledger_create_draft", arguments)
+
+
+async def _call_ledger_list_drafts(
+    artifact_type: str | None = None,
+    artifact_id: str | None = None,
+    draft_type: str | None = None,
+):
+    async with create_connected_server_and_client_session(mcp) as client:
+        arguments: dict = {}
+        if artifact_type is not None:
+            arguments["artifact_type"] = artifact_type
+        if artifact_id is not None:
+            arguments["artifact_id"] = artifact_id
+        if draft_type is not None:
+            arguments["draft_type"] = draft_type
+        return await client.call_tool("ledger_list_drafts", arguments)
+
+
+def test_ledger_create_draft_tool_writes_file_and_returns_draft(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(
+        _call_ledger_create_draft(
+            "bia",
+            "sys01",
+            "owner_reconfirmation",
+            "Please reconfirm ownership of sys01",
+            "Hi -- can you confirm you still own this system?",
+            "jane.doe@example.com",
+        )
+    )
+
+    assert result.isError is False
+    payload = result.structuredContent
+    assert payload["artifact_type"] == "bia"
+    assert payload["artifact_id"] == "sys01"
+    assert payload["draft_type"] == "owner_reconfirmation"
+    assert payload["recipient"] == "jane.doe@example.com"
+    assert payload["subject"] == "Please reconfirm ownership of sys01"
+    assert payload["body"] == "Hi -- can you confirm you still own this system?"
+    assert (ledger_dir / "drafts" / f"{payload['draft_id']}.md").exists()
+
+
+def test_ledger_create_draft_tool_no_recipient_orphan_risk_stays_none(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance criterion: a draft created with no recipient for an
+    orphan-risk artifact reports `recipient` absent/`None` when listed, not
+    a guessed value.
+    """
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys02",
+            source="git:local",
+            fields={"author": "someone@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    create_result = asyncio.run(
+        _call_ledger_create_draft(
+            "bia",
+            "sys02",
+            "owner_reconfirmation",
+            "Who owns sys02?",
+            "No resolved owner was found for this artifact.",
+        )
+    )
+    assert create_result.isError is False
+    assert create_result.structuredContent["recipient"] is None
+
+    list_result = asyncio.run(_call_ledger_list_drafts(artifact_id="sys02"))
+    assert list_result.isError is False
+    listed = list_result.structuredContent["result"]
+    assert len(listed) == 1
+    assert listed[0]["recipient"] is None
+
+
+def test_ledger_create_draft_tool_rejects_blank_field_without_writing(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(
+        _call_ledger_create_draft("bia", "sys01", "owner_reconfirmation", "", "body")
+    )
+
+    assert result.isError is True
+    assert not (ledger_dir / "drafts").exists()
+
+
+def test_ledger_list_drafts_tool_no_filters_matches_list_drafts(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="subject",
+        body="body",
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_drafts())
+
+    assert result.isError is False
+    assert len(result.structuredContent["result"]) == 1
+
+
+def test_ledger_list_drafts_tool_returns_empty_when_none_exist(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_drafts())
+
+    assert result.isError is False
+    assert result.structuredContent == {"result": []}
+
+
+def test_ledger_list_drafts_tool_filtered_by_draft_type(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="subject one",
+        body="body one",
+        ledger_dir=ledger_dir,
+    )
+    create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="tier_review",
+        subject="subject two",
+        body="body two",
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_drafts(draft_type="tier_review"))
+
+    assert result.isError is False
+    listed = result.structuredContent["result"]
+    assert len(listed) == 1
+    assert listed[0]["draft_type"] == "tier_review"
+
+
+# ===========================================================================
+# Story 9 review follow-ups: draft_type escaping, duplicate-key detection,
+# per-file error isolation, recipient round-trip, exhausted-attempts /
+# NotADirectoryError branches, and sort-order assertion.
+# ===========================================================================
+
+
+# --- Main bug: draft_type with an embedded newline is escaped, not raw -----
+
+
+def test_create_draft_escapes_draft_type_embedded_newline_and_round_trips(
+    ledger_dir: Path,
+) -> None:
+    """An unescaped `draft_type` with an embedded newline could either break
+    the frontmatter fence or inject a fake extra "key: value" line that
+    silently overwrites a real field (e.g. `artifact_type`) in the parsed
+    metadata. Proves `draft_type` is escaped the same way `subject`/
+    `recipient` already are, and that the resulting file round-trips
+    cleanly rather than corrupting or being misparsed.
+    """
+    malicious_draft_type = "tier_review\nartifact_type: injected_type"
+
+    draft = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type=malicious_draft_type,
+        subject="subject",
+        body="body",
+        ledger_dir=ledger_dir,
+    )
+
+    path = ledger_dir / "drafts" / f"{draft.draft_id}.md"
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    # Exactly two "---" fence lines: the newline never broke the frontmatter
+    # structure into more sections than intended.
+    assert lines.count("---") == 2
+    # The embedded newline was collapsed to a space, not left as a raw
+    # newline -- so no second, injected "artifact_type:" *line* exists
+    # anywhere in the file (the escaped draft_type value line legitimately
+    # contains "artifact_type:" as plain text within it, which is fine --
+    # what matters is it is never its own frontmatter line).
+    assert sum(1 for line in lines if line.startswith("artifact_type:")) == 1
+    assert "artifact_type: injected_type" not in lines
+
+    [read_back] = list_drafts(ledger_dir=ledger_dir)
+    # The real artifact_type was never overwritten by the injected line.
+    assert read_back.artifact_type == "bia"
+    assert read_back.artifact_id == "sys01"
+    # The embedded newline is collapsed to a space at write time (like
+    # subject/recipient already were), so this is what round-trips back --
+    # not the raw multi-line value `create_draft` was originally given.
+    assert read_back.draft_type == "tier_review artifact_type: injected_type"
+
+
+# --- Duplicate frontmatter key detection (defense in depth) ----------------
+
+
+def test_parsing_draft_file_with_duplicate_frontmatter_key_raises(
+    ledger_dir: Path,
+) -> None:
+    from ledger_core.drafts import _parse_draft_file
+
+    drafts_dir = ledger_dir / "drafts"
+    drafts_dir.mkdir(parents=True)
+    tampered = drafts_dir / "20260101T000000Z-abcdef.md"
+    tampered.write_text(
+        "---\n"
+        "artifact_type: bia\n"
+        "artifact_id: sys01\n"
+        "draft_type: owner_reconfirmation\n"
+        "subject: subject\n"
+        "recipient: \n"
+        "created_at: 2026-01-01T00:00:00Z\n"
+        "artifact_type: injected\n"
+        "---\n\n"
+        "body\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DraftFileFormatError):
+        _parse_draft_file(tampered)
+
+
+# --- Fix 3: a corrupted/tampered draft file isolates to itself -------------
+
+
+def test_list_drafts_isolates_corrupted_file_and_still_lists_healthy_drafts(
+    ledger_dir: Path,
+) -> None:
+    healthy = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="healthy subject",
+        body="healthy body",
+        ledger_dir=ledger_dir,
+    )
+
+    drafts_dir = ledger_dir / "drafts"
+    tampered_path = drafts_dir / "20260101T000000Z-abcdef.md"
+    tampered_path.write_text("not a draft file at all", encoding="utf-8")
+
+    drafts = list_drafts(ledger_dir=ledger_dir)
+
+    by_id = {draft.draft_id: draft for draft in drafts}
+    assert len(drafts) == 2
+    # The healthy draft is unaffected.
+    assert by_id[healthy.draft_id] == healthy
+    # The corrupted file is surfaced, not silently dropped.
+    sentinel = by_id[tampered_path.stem]
+    assert sentinel.artifact_type == DRAFT_FORMAT_ERROR_MARKER
+    assert sentinel.artifact_id == DRAFT_FORMAT_ERROR_MARKER
+    assert sentinel.draft_type == DRAFT_FORMAT_ERROR_MARKER
+    assert sentinel.recipient is None
+
+    # The sentinel is always included, even under a filter it doesn't match.
+    filtered = list_drafts(artifact_type="bia", ledger_dir=ledger_dir)
+    filtered_ids = {draft.draft_id for draft in filtered}
+    assert healthy.draft_id in filtered_ids
+    assert tampered_path.stem in filtered_ids
+
+
+# --- Fix 4: empty-string recipient behaves exactly like an omitted one -----
+
+
+def test_create_draft_empty_string_recipient_triggers_escalation_owner_lookup(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"support_group": "DR Platform Engineering"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    draft = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="subject",
+        body="body",
+        recipient="   ",
+        ledger_dir=ledger_dir,
+    )
+
+    # An empty/whitespace-only recipient is treated exactly like an omitted
+    # one -- it triggers the escalation_owner lookup, not left as "".
+    assert draft.recipient == "DR Platform Engineering"
+
+    [read_back] = list_drafts(ledger_dir=ledger_dir)
+    assert read_back == draft
+
+
+def test_create_draft_empty_string_recipient_with_no_owner_matches_read_back(
+    ledger_dir: Path,
+) -> None:
+    """Even with no resolvable owner, the created Draft and the Draft
+    `list_drafts` reads back later must agree (both `None`, never one `""`
+    and the other `None`).
+    """
+    draft = create_draft(
+        artifact_type="bia",
+        artifact_id="never-ingested",
+        draft_type="owner_reconfirmation",
+        subject="subject",
+        body="body",
+        recipient="",
+        ledger_dir=ledger_dir,
+    )
+
+    assert draft.recipient is None
+    [read_back] = list_drafts(ledger_dir=ledger_dir)
+    assert read_back == draft
+
+
+# --- Fix 5: a corrupted target-artifact log degrades to recipient=None -----
+
+
+def test_create_draft_recipient_lookup_log_format_error_falls_back_to_none(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "bia.log.md").write_text(
+        "this is not a valid event log line\n", encoding="utf-8"
+    )
+
+    draft = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="subject",
+        body="body",
+        ledger_dir=ledger_dir,
+    )
+
+    assert draft.recipient is None
+
+
+# --- Untested RuntimeError branch: _MAX_DRAFT_ID_ATTEMPTS exhausted --------
+
+
+def test_create_draft_raises_runtime_error_when_max_attempts_exhausted(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ledger_core.drafts as drafts_module
+
+    fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(drafts_module, "datetime", _FixedDateTime)
+    # Every attempt generates the exact same draft_id, so every attempt
+    # after the file is first created collides.
+    monkeypatch.setattr(drafts_module.secrets, "token_hex", lambda _n: "aaaaaa")
+
+    drafts_dir = ledger_dir / "drafts"
+    drafts_dir.mkdir(parents=True)
+    (drafts_dir / "20260101T120000Z-aaaaaa.md").write_text(
+        "already taken", encoding="utf-8"
+    )
+
+    with pytest.raises(RuntimeError):
+        create_draft(
+            artifact_type="bia",
+            artifact_id="sys01",
+            draft_type="owner_reconfirmation",
+            subject="subject",
+            body="body",
+            ledger_dir=ledger_dir,
+        )
+
+
+# --- Untested NotADirectoryError branch in _ensure_drafts_dir --------------
+
+
+def test_create_draft_raises_not_a_directory_error_when_drafts_dir_is_a_file(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    blocked_drafts_path = ledger_dir / "drafts"
+    blocked_drafts_path.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(NotADirectoryError):
+        create_draft(
+            artifact_type="bia",
+            artifact_id="sys01",
+            draft_type="owner_reconfirmation",
+            subject="subject",
+            body="body",
+            ledger_dir=ledger_dir,
+        )
+
+
+# --- Fix 7: a failed write after successful exclusive create is cleaned up -
+
+
+def test_create_draft_removes_partial_file_when_write_fails(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ledger_core.drafts as drafts_module
+
+    fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now
+
+    monkeypatch.setattr(drafts_module, "datetime", _FixedDateTime)
+    monkeypatch.setattr(drafts_module.secrets, "token_hex", lambda _n: "aaaaaa")
+
+    def _boom(_draft: Draft) -> str:
+        raise ValueError("boom")
+
+    monkeypatch.setattr(drafts_module, "_render_draft", _boom)
+
+    with pytest.raises(ValueError, match="boom"):
+        create_draft(
+            artifact_type="bia",
+            artifact_id="sys01",
+            draft_type="owner_reconfirmation",
+            subject="subject",
+            body="body",
+            ledger_dir=ledger_dir,
+        )
+
+    drafts_dir = ledger_dir / "drafts"
+    assert not (drafts_dir / "20260101T120000Z-aaaaaa.md").exists()
+
+
+# --- Sort-order assertion: list_drafts really returns chronological order --
+
+
+def test_list_drafts_returns_drafts_in_chronological_filename_order(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing list_drafts tests only ever compare *sets* of draft_ids;
+    this asserts the claimed chronological/filename sort order actually
+    holds for the returned list itself.
+    """
+    import ledger_core.drafts as drafts_module
+
+    times = iter(
+        [
+            datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 1, 1, 12, 0, 1, tzinfo=timezone.utc),
+            datetime(2026, 1, 1, 12, 0, 2, tzinfo=timezone.utc),
+        ]
+    )
+
+    class _FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return next(times)
+
+    monkeypatch.setattr(drafts_module, "datetime", _FixedDateTime)
+    monkeypatch.setattr(drafts_module.secrets, "token_hex", lambda _n: "aaaaaa")
+
+    first = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="created first",
+        body="body",
+        ledger_dir=ledger_dir,
+    )
+    second = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="created second",
+        body="body",
+        ledger_dir=ledger_dir,
+    )
+    third = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="created third",
+        body="body",
+        ledger_dir=ledger_dir,
+    )
+
+    drafts = list_drafts(ledger_dir=ledger_dir)
+
+    # Not merely the same *set* of draft_ids -- the same order, matching
+    # creation order (which the sortable timestamp-prefixed draft_id
+    # guarantees also matches filename sort order).
+    assert [d.draft_id for d in drafts] == [
+        first.draft_id,
+        second.draft_id,
+        third.draft_id,
+    ]
