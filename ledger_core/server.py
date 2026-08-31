@@ -1,17 +1,20 @@
 """Ledger-core MCP server (AD-1, AD-2): ledger-core is its own MCP server.
 
-Exposes six tools: a read/query surface over projection.py
+Exposes seven tools: a read/query surface over projection.py
 (`ledger_get_record`, `ledger_get_coverage`, `ledger_list_records`), the one
 and only ingestion path into the append-only log (`ledger_ingest_raw_fact`),
-and the draft-not-send outbound content queue over drafts.py
-(`ledger_create_draft`, `ledger_list_drafts` -- AD-6, CAP-6, Story 9). Ledger
-state can only ever be changed by appending to the log (AD-3) --
+the draft-not-send outbound content queue over drafts.py
+(`ledger_create_draft`, `ledger_list_drafts` -- AD-6, CAP-6, Story 9), and the
+periodic briefing over briefing.py (`ledger_get_briefing` -- CAP-7, Story
+10). Ledger state can only ever be changed by appending to the log (AD-3) --
 `ledger_ingest_raw_fact` constructs a `RawFact` and calls `append_event`; it
 has no other side effect and no `confidence` parameter (confidence is
 computed exclusively by `projection.get_record`, AD-5). `ledger_create_draft`
 is the only other tool with a write side effect -- it writes exactly one new
 file under `ledger_data/drafts/` and calls no external send/write API of any
-kind (AD-6).
+kind (AD-6). `ledger_get_briefing`, like every other read tool here, performs
+no write of any kind -- it composes `get_record`/`list_records`/`list_drafts`/
+`get_coverage_map`'s own results, nothing more.
 """
 
 from __future__ import annotations
@@ -20,12 +23,52 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from ledger_core.briefing import get_briefing
 from ledger_core.drafts import Draft, create_draft, list_drafts
 from ledger_core.log import append_event
 from ledger_core.projection import get_coverage_map, get_record, list_records
-from shared.ledger_schema import RawFact
+from shared.ledger_schema import LedgerRecord, RawFact
 
 mcp = FastMCP("ledger-core")
+
+
+def _record_to_dict(record: LedgerRecord) -> dict[str, Any]:
+    """The one LedgerRecord-to-dict shape every read tool below serializes.
+
+    Shared by `ledger_get_record`, `ledger_list_records`, and
+    `ledger_get_briefing` so a future `LedgerRecord` field only needs to be
+    added here once -- not kept in sync across three independent call
+    sites.
+    """
+    return {
+        "artifact_type": record.artifact_type,
+        "artifact_id": record.artifact_id,
+        "fields": dict(record.fields),
+        "last_verified": record.last_verified,
+        "verification_method": record.verification_method,
+        "expiry_rule": record.expiry_rule,
+        "tier_sla": record.tier_sla,
+        "escalation_owner": record.escalation_owner,
+        "confidence": record.confidence,
+    }
+
+
+def _draft_to_dict(draft: Draft) -> dict[str, Any]:
+    """The one Draft-to-dict shape every read/write tool below serializes.
+
+    Shared by `ledger_create_draft`, `ledger_list_drafts`, and
+    `ledger_get_briefing`.
+    """
+    return {
+        "draft_id": draft.draft_id,
+        "artifact_type": draft.artifact_type,
+        "artifact_id": draft.artifact_id,
+        "draft_type": draft.draft_type,
+        "subject": draft.subject,
+        "body": draft.body,
+        "recipient": draft.recipient,
+        "created_at": draft.created_at,
+    }
 
 
 @mcp.tool(name="ledger_get_record")
@@ -44,17 +87,7 @@ def ledger_get_record(artifact_type: str, artifact_id: str) -> dict[str, Any]:
     and a non-string scalar all fall through the same way) (AD-10).
     """
     record = get_record(artifact_type, artifact_id)
-    return {
-        "artifact_type": record.artifact_type,
-        "artifact_id": record.artifact_id,
-        "fields": dict(record.fields),
-        "last_verified": record.last_verified,
-        "verification_method": record.verification_method,
-        "expiry_rule": record.expiry_rule,
-        "tier_sla": record.tier_sla,
-        "escalation_owner": record.escalation_owner,
-        "confidence": record.confidence,
-    }
+    return _record_to_dict(record)
 
 
 @mcp.tool(name="ledger_ingest_raw_fact")
@@ -146,33 +179,7 @@ def ledger_list_records(
     records = list_records(
         artifact_type=artifact_type, confidence=confidence, orphan_risk=orphan_risk
     )
-    return [
-        {
-            "artifact_type": record.artifact_type,
-            "artifact_id": record.artifact_id,
-            "fields": dict(record.fields),
-            "last_verified": record.last_verified,
-            "verification_method": record.verification_method,
-            "expiry_rule": record.expiry_rule,
-            "tier_sla": record.tier_sla,
-            "escalation_owner": record.escalation_owner,
-            "confidence": record.confidence,
-        }
-        for record in records
-    ]
-
-
-def _draft_to_dict(draft: Draft) -> dict[str, Any]:
-    return {
-        "draft_id": draft.draft_id,
-        "artifact_type": draft.artifact_type,
-        "artifact_id": draft.artifact_id,
-        "draft_type": draft.draft_type,
-        "subject": draft.subject,
-        "body": draft.body,
-        "recipient": draft.recipient,
-        "created_at": draft.created_at,
-    }
+    return [_record_to_dict(record) for record in records]
 
 
 @mcp.tool(name="ledger_create_draft")
@@ -243,6 +250,48 @@ def ledger_list_drafts(
         draft_type=draft_type,
     )
     return [_draft_to_dict(draft) for draft in drafts]
+
+
+@mcp.tool(name="ledger_get_briefing")
+def ledger_get_briefing() -> dict[str, Any]:
+    """Return the periodic briefing: what needs a decision today (CAP-7, Story 10).
+
+    Composes only existing read functions -- `ledger_core.projection.list_records`
+    (once with `orphan_risk=True`, once with `confidence="unknown"`),
+    `ledger_core.drafts.list_drafts`, and
+    `ledger_core.projection.get_coverage_map` -- no new computation is
+    performed about artifact state. Section order is fixed: `orphan_risk`,
+    `unknown_confidence`, `pending_drafts`, `data_quality_issues` -- not a
+    computed priority ranking (no tier/SLA data source exists yet to rank
+    by). Because each section is exactly what the corresponding direct query
+    would return at the same point in time, this briefing's content always
+    matches a live query -- by construction, not by a parallel
+    reimplementation that could drift out of sync.
+
+    Read-only: performs no write of any kind (no log append, no draft
+    file). `generated_at` is the UTC timestamp this briefing was assembled,
+    so a caller can tell how fresh it is. Never raises for an empty ledger --
+    every section is simply empty, `generated_at` is still populated. The
+    delivery channel (Slack, email, terminal, ...) is entirely out of scope
+    here: this tool returns structured data only.
+    """
+    briefing = get_briefing()
+    return {
+        "orphan_risk": [_record_to_dict(record) for record in briefing.orphan_risk],
+        "unknown_confidence": [
+            _record_to_dict(record) for record in briefing.unknown_confidence
+        ],
+        "pending_drafts": [_draft_to_dict(draft) for draft in briefing.pending_drafts],
+        # `dict(tally)` copies each per-type tally too, not just the outer
+        # dict -- `briefing.data_quality_issues`'s nested dicts must not
+        # leak out as shared references a client-side mutation could alias
+        # back into ledger-core's internal state.
+        "data_quality_issues": {
+            artifact_type: dict(tally)
+            for artifact_type, tally in briefing.data_quality_issues.items()
+        },
+        "generated_at": briefing.generated_at,
+    }
 
 
 def main() -> None:

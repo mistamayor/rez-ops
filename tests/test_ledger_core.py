@@ -21,6 +21,7 @@ from connectors.git_repo.server import git_get_last_touched
 from connectors.ticketing.server import ticketing_get_ticket_status
 from ledger_core import projection as projection_module
 from ledger_core import server as server_module
+from ledger_core.briefing import Briefing, get_briefing
 from ledger_core.drafts import (
     DRAFT_FORMAT_ERROR_MARKER,
     Draft,
@@ -212,13 +213,14 @@ def test_ledger_record_rejects_invalid_confidence_value() -> None:
 # --- Acceptance: MCP server exposes exactly one read tool -----------------
 
 
-def test_server_exposes_exactly_six_tools_none_calling_an_external_send_api() -> None:
-    """Acceptance criterion (Story 9): a client listing tools sees
-    `ledger_create_draft` and `ledger_list_drafts` alongside the four
-    existing tools, and (by construction -- see the ingestion/coverage/list/
-    draft tests below, and `ledger_core/drafts.py`'s complete absence of any
-    `httpx`/network import) neither `ledger_create_draft` nor any other tool
-    calls an external send API.
+def test_server_exposes_exactly_seven_tools_none_calling_an_external_send_api() -> None:
+    """Acceptance criterion (Story 9, extended by Story 10): a client listing
+    tools sees `ledger_create_draft` and `ledger_list_drafts` alongside the
+    four pre-existing tools, plus `ledger_get_briefing` (Story 10, CAP-7),
+    and (by construction -- see the ingestion/coverage/list/draft/briefing
+    tests below, and `ledger_core/drafts.py`'s and `ledger_core/briefing.py`'s
+    complete absence of any `httpx`/network import) none of them calls an
+    external send API.
     """
     tools = asyncio.run(mcp.list_tools())
     names = [tool.name for tool in tools]
@@ -229,6 +231,7 @@ def test_server_exposes_exactly_six_tools_none_calling_an_external_send_api() ->
         "ledger_list_records",
         "ledger_create_draft",
         "ledger_list_drafts",
+        "ledger_get_briefing",
     ]
 
 
@@ -292,6 +295,11 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
             draft_type=draft_type,
             ledger_dir=ledger_dir,
         ),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "get_briefing",
+        lambda: get_briefing(ledger_dir=ledger_dir),
     )
 
 
@@ -3138,3 +3146,371 @@ def test_list_drafts_returns_drafts_in_chronological_filename_order(
         second.draft_id,
         third.draft_id,
     ]
+
+
+# --- Story 10: periodic briefing (CAP-7) ------------------------------------
+
+
+def _assert_generated_at_is_utc_timestamp(generated_at: str) -> None:
+    # Raises ValueError if the shape doesn't match -- proves `generated_at`
+    # really is rendered in the project's one UTC timestamp format, not just
+    # "some string".
+    parsed = datetime.strptime(generated_at, "%Y-%m-%dT%H:%M:%SZ")
+    assert parsed.tzinfo is None  # strptime never attaches tzinfo; format ends "Z"
+
+
+# --- I/O matrix row: happy path ---------------------------------------------
+
+
+def test_get_briefing_happy_path_all_sections_populated(ledger_dir: Path) -> None:
+    # Orphan-risk: a known artifact with no resolvable escalation_owner.
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="git:local",
+            fields={"author": "someone@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    # Unknown-confidence: an artifact_id folded in with genuinely no fields.
+    append_event(
+        RawFact(
+            artifact_type="tiering",
+            artifact_id="sys02",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    draft = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="Please reconfirm ownership of sys01",
+        body="No resolved owner was found for this artifact.",
+        ledger_dir=ledger_dir,
+    )
+
+    briefing = get_briefing(ledger_dir=ledger_dir)
+
+    assert isinstance(briefing, Briefing)
+    assert [r.artifact_id for r in briefing.orphan_risk] == ["sys01"]
+    assert [r.artifact_id for r in briefing.unknown_confidence] == ["sys02"]
+    assert [d.draft_id for d in briefing.pending_drafts] == [draft.draft_id]
+    assert briefing.data_quality_issues == {}
+    _assert_generated_at_is_utc_timestamp(briefing.generated_at)
+
+
+# --- I/O matrix row: empty ledger -------------------------------------------
+
+
+def test_get_briefing_empty_ledger_all_sections_empty_never_raises(
+    ledger_dir: Path,
+) -> None:
+    assert not ledger_dir.exists()
+
+    briefing = get_briefing(ledger_dir=ledger_dir)
+
+    assert briefing.orphan_risk == ()
+    assert briefing.unknown_confidence == ()
+    assert briefing.pending_drafts == ()
+    assert briefing.data_quality_issues == {}
+    _assert_generated_at_is_utc_timestamp(briefing.generated_at)
+    # A pure read never creates the ledger_dir as a side effect.
+    assert not ledger_dir.exists()
+
+
+# --- I/O matrix rows: content matches a direct, live query -----------------
+
+
+def _seed_mixed_ledger_state(ledger_dir: Path) -> None:
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="git:local",
+            fields={"author": "someone@example.com"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="cmdb",
+            artifact_id="sys03",
+            source="cmdb:snow",
+            fields={"support_group": "platform-team"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="tiering",
+            artifact_id="sys02",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="subject",
+        body="body",
+        ledger_dir=ledger_dir,
+    )
+
+
+def test_get_briefing_orphan_risk_section_matches_direct_list_records_call(
+    ledger_dir: Path,
+) -> None:
+    _seed_mixed_ledger_state(ledger_dir)
+
+    briefing = get_briefing(ledger_dir=ledger_dir)
+    direct = list_records(orphan_risk=True, ledger_dir=ledger_dir)
+
+    assert briefing.orphan_risk == tuple(direct)
+    assert briefing.orphan_risk  # not vacuously true -- at least one record
+
+
+def test_get_briefing_unknown_confidence_section_matches_direct_list_records_call(
+    ledger_dir: Path,
+) -> None:
+    _seed_mixed_ledger_state(ledger_dir)
+
+    briefing = get_briefing(ledger_dir=ledger_dir)
+    direct = list_records(confidence="unknown", ledger_dir=ledger_dir)
+
+    assert briefing.unknown_confidence == tuple(direct)
+    assert briefing.unknown_confidence
+
+
+def test_get_briefing_pending_drafts_section_matches_direct_list_drafts_call(
+    ledger_dir: Path,
+) -> None:
+    _seed_mixed_ledger_state(ledger_dir)
+
+    briefing = get_briefing(ledger_dir=ledger_dir)
+    direct = list_drafts(ledger_dir=ledger_dir)
+
+    assert briefing.pending_drafts == tuple(direct)
+    assert briefing.pending_drafts
+
+
+# --- I/O matrix row: corrupted artifact-type log ----------------------------
+
+
+def test_get_briefing_corrupted_artifact_type_log_surfaces_in_data_quality_issues(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+    append_event(
+        RawFact(
+            artifact_type="healthy_type",
+            artifact_id="h1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    briefing = get_briefing(ledger_dir=ledger_dir)
+
+    # The rest of the briefing still generates -- not aborted by the
+    # corrupted type (AD-8: graceful degradation).
+    assert briefing.data_quality_issues == {
+        "broken_type": {LOG_FORMAT_ERROR_MARKER: 1}
+    }
+    # The corrupted type's sentinel is real, visible content, per
+    # list_records' own existing behavior -- not deduped away here.
+    orphan_ids = {r.artifact_id for r in briefing.orphan_risk}
+    unknown_ids = {r.artifact_id for r in briefing.unknown_confidence}
+    assert LOG_FORMAT_ERROR_ARTIFACT_ID in orphan_ids
+    assert LOG_FORMAT_ERROR_ARTIFACT_ID in unknown_ids
+    _assert_generated_at_is_utc_timestamp(briefing.generated_at)
+
+
+def test_get_briefing_multiple_corrupted_artifact_types_all_accumulate(
+    ledger_dir: Path,
+) -> None:
+    """Two (or more) simultaneously-corrupted artifact-type logs must each
+    show up in `data_quality_issues` -- not just the first one encountered,
+    and not collapsed into a single entry.
+    """
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type_one.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+    (ledger_dir / "broken_type_two.log.md").write_text(
+        "also not a valid event log line\n", encoding="utf-8"
+    )
+    append_event(
+        RawFact(
+            artifact_type="healthy_type",
+            artifact_id="h1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    briefing = get_briefing(ledger_dir=ledger_dir)
+
+    assert briefing.data_quality_issues == {
+        "broken_type_one": {LOG_FORMAT_ERROR_MARKER: 1},
+        "broken_type_two": {LOG_FORMAT_ERROR_MARKER: 1},
+    }
+    # The healthy type is unaffected and not itself flagged.
+    assert "healthy_type" not in briefing.data_quality_issues
+    _assert_generated_at_is_utc_timestamp(briefing.generated_at)
+
+
+def test_get_briefing_healthy_types_data_quality_issues_stays_empty(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="healthy_type",
+            artifact_id="h1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    briefing = get_briefing(ledger_dir=ledger_dir)
+
+    assert briefing.data_quality_issues == {}
+
+
+# --- I/O matrix row: corrupted draft file -----------------------------------
+
+
+def test_get_briefing_corrupted_draft_file_included_as_sentinel_no_crash(
+    ledger_dir: Path,
+) -> None:
+    healthy = create_draft(
+        artifact_type="bia",
+        artifact_id="sys01",
+        draft_type="owner_reconfirmation",
+        subject="healthy subject",
+        body="healthy body",
+        ledger_dir=ledger_dir,
+    )
+    drafts_dir = ledger_dir / "drafts"
+    tampered_path = drafts_dir / "20260101T000000Z-abcdef.md"
+    tampered_path.write_text("not a draft file at all", encoding="utf-8")
+
+    briefing = get_briefing(ledger_dir=ledger_dir)
+
+    by_id = {draft.draft_id: draft for draft in briefing.pending_drafts}
+    assert len(briefing.pending_drafts) == 2
+    assert by_id[healthy.draft_id] == healthy
+    sentinel = by_id[tampered_path.stem]
+    assert sentinel.artifact_type == DRAFT_FORMAT_ERROR_MARKER
+    _assert_generated_at_is_utc_timestamp(briefing.generated_at)
+
+
+# --- get_briefing performs no mutation --------------------------------------
+
+
+def test_get_briefing_writes_nothing(ledger_dir: Path) -> None:
+    _seed_mixed_ledger_state(ledger_dir)
+    before = {
+        path.name: path.read_bytes()
+        for path in sorted(ledger_dir.rglob("*"))
+        if path.is_file()
+    }
+
+    get_briefing(ledger_dir=ledger_dir)
+
+    after = {
+        path.name: path.read_bytes()
+        for path in sorted(ledger_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert before == after
+
+
+# --- ledger_get_briefing MCP tool -------------------------------------------
+
+
+async def _call_ledger_get_briefing():
+    async with create_connected_server_and_client_session(mcp) as client:
+        return await client.call_tool("ledger_get_briefing", {})
+
+
+def test_ledger_get_briefing_tool_matches_get_briefing(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_mixed_ledger_state(ledger_dir)
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_get_briefing())
+
+    assert result.isError is False
+    expected = get_briefing(ledger_dir=ledger_dir)
+    assert result.structuredContent == {
+        "orphan_risk": [
+            server_module._record_to_dict(r) for r in expected.orphan_risk
+        ],
+        "unknown_confidence": [
+            server_module._record_to_dict(r) for r in expected.unknown_confidence
+        ],
+        "pending_drafts": [
+            server_module._draft_to_dict(d) for d in expected.pending_drafts
+        ],
+        "data_quality_issues": expected.data_quality_issues,
+        "generated_at": expected.generated_at,
+    }
+
+
+def test_ledger_get_briefing_tool_empty_ledger_never_raises(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_get_briefing())
+
+    assert result.isError is False
+    assert result.structuredContent["orphan_risk"] == []
+    assert result.structuredContent["unknown_confidence"] == []
+    assert result.structuredContent["pending_drafts"] == []
+    assert result.structuredContent["data_quality_issues"] == {}
+    assert result.structuredContent["generated_at"]
+
+
+def test_ledger_get_briefing_tool_performs_no_write(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance criterion: `ledger_get_briefing` performs no write of any
+    kind -- calling it never creates `ledger_dir`, a log file, or a draft.
+    """
+    assert not ledger_dir.exists()
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_get_briefing())
+
+    assert result.isError is False
+    assert not ledger_dir.exists()
+
+
+def test_ledger_get_briefing_tool_surfaces_corrupted_type_in_data_quality_issues(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_get_briefing())
+
+    assert result.isError is False
+    assert result.structuredContent["data_quality_issues"] == {
+        "broken_type": {LOG_FORMAT_ERROR_MARKER: 1}
+    }

@@ -117,3 +117,7 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/9-draft-not-send-outbound-content.md`
   summary: No pagination or size limit on `list_drafts`/`ledger_list_drafts` -- same category as the existing coverage/list_records pagination deferrals.
   evidence: Fine at current scale; revisit alongside the other pagination deferrals once real draft volume grows.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/10-periodic-briefing.md`
+  summary: `get_briefing`'s four underlying reads (two `list_records` calls, `list_drafts`, `get_coverage_map`) are sequential and unsynchronized -- a write landing between them could produce a briefing that mixes ledger state from different moments, rather than one consistent point-in-time snapshot.
+  evidence: Same root category as Story 1's existing no-file-locking deferral, just surfacing as a new symptom (cross-section inconsistency within one briefing) rather than a corrupted single write; low real-world risk for a single-process, on-demand, local-first v1 tool with no concurrent writers today.
