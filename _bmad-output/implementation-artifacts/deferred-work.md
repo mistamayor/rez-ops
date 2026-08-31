@@ -121,3 +121,31 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/10-periodic-briefing.md`
   summary: `get_briefing`'s four underlying reads (two `list_records` calls, `list_drafts`, `get_coverage_map`) are sequential and unsynchronized -- a write landing between them could produce a briefing that mixes ledger state from different moments, rather than one consistent point-in-time snapshot.
   evidence: Same root category as Story 1's existing no-file-locking deferral, just surfacing as a new symptom (cross-section inconsistency within one briefing) rather than a corrupted single write; low real-world risk for a single-process, on-demand, local-first v1 tool with no concurrent writers today.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/11-scheduled-headless-operation.md`
+  summary: No concurrency guard against two overlapping invocations of `ops/run_scheduled_briefing.py` (e.g. a slow scheduled run still in flight when the next one fires).
+  evidence: Same root category as the project's existing no-file-locking deferral, now applying to `_ops.log.md`; low real-world risk at v1's expected once-daily cadence, but a real gap for a script explicitly meant to run unattended and repeatedly.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/11-scheduled-headless-operation.md`
+  summary: On a `claude -p` timeout, only the immediate child process is killed -- any MCP server grandchild processes it spawned aren't guaranteed to be cleaned up, risking orphaned processes after a timed-out scheduled run.
+  evidence: `subprocess.run`'s default timeout handling only reaches the direct child; process-group management (`start_new_session` + killing the group) would need its own design and testing, and no existing pattern in this codebase (including `connectors/git_repo/server.py`'s `_run_git`) currently does this.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/11-scheduled-headless-operation.md`
+  summary: No non-interactive/permission-mode flag is passed to `claude -p` -- if the CLI would otherwise prompt for tool-use approval, an unattended scheduled run has no human to answer it, and the resulting stall would surface as a misleading `timeout` log entry rather than the real cause.
+  evidence: Needs research into `claude -p`'s actual non-interactive/auto-approve flag semantics before a correct fix can be written; guessing at a flag risks silently no-op-ing or breaking the invocation.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/11-scheduled-headless-operation.md`
+  summary: No MCP tool allowlist restricts the headless scheduled run to read-only tools -- nothing currently prevents the fixed prompt from being permitted to call a state-changing tool (e.g. `ledger_create_draft`) rather than being scoped to the read-only briefing path.
+  evidence: This story's frozen intent is invocation plumbing only, not access-control policy; a tool allowlist is a real hardening step but a separate scoped decision (which tools, enforced how) not resolved by this story's spec.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/11-scheduled-headless-operation.md`
+  summary: No redaction/scrubbing of subprocess `stderr` before it's persisted into `ledger_data/_ops.log.md` -- if `claude -p` or a connector ever emits a credential/token in its error output, truncation alone doesn't prevent it from landing in a file `ops/README.md` tells operators to read directly.
+  evidence: A real defense-in-depth gap, but building a correct redaction step (what patterns, what false-positive/negative tradeoffs) is its own scoped decision, not a safe one-line patch.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/11-scheduled-headless-operation.md`
+  summary: No log rotation or size cap on `ledger_data/_ops.log.md`, same category as the project's existing pagination/size-limit deferrals.
+  evidence: Fine at current scale for a once-daily scheduled job; revisit alongside the other size-limit deferrals once real run history accumulates.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/11-scheduled-headless-operation.md`
+  summary: `ledger_data/` is not committed and has no `.gitignore` entry, despite the top-level `README.md` describing it as git-committed -- this story adds `_ops.log.md` (and its README documents `_cron_stdout.log`/`_launchd_stdout.log`/`_launchd_stderr.log`) as more files that could land there ungoverned.
+  evidence: Pre-existing gap predating this story (no prior story has committed `ledger_data/` either); the policy decision -- commit runtime state or gitignore it -- is broader than this story's scope.

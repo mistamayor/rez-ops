@@ -16,13 +16,14 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ## Status
 
-7 of 11 planned stories shipped, 306 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown and what's next (currently: ownership inference and arbitration).
+All 11 planned stories shipped, 399 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
 
 **Built:**
 - Shared `RawFact`/`LedgerRecord` schema and append-only ledger core (confidence, coverage, live queries)
 - Four Sensors: git (local, no credentials needed), ServiceNow ticketing, Google Calendar, ServiceNow CMDB
+- Ownership inference/arbitration and orphan-risk detection, draft-not-send outbound content, a periodic briefing aggregating what needs a decision today, and `.mcp.json` + `ops/run_scheduled_briefing.py` for OS-scheduled headless operation with explicit failure logging
 
-**Not yet built:** ownership arbitration, draft-not-send outbound content, periodic briefing, scheduled headless operation — see `stories.yaml`. Known gaps and accepted risks are tracked in [`_bmad-output/implementation-artifacts/deferred-work.md`](_bmad-output/implementation-artifacts/deferred-work.md).
+**Not yet done:** registering an actual cron/launchd job on any machine — `ops/README.md` documents how, but nothing installs one automatically. Known gaps and accepted risks are tracked in [`_bmad-output/implementation-artifacts/deferred-work.md`](_bmad-output/implementation-artifacts/deferred-work.md).
 
 ## Requirements
 
@@ -33,21 +34,23 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ```bash
 uv sync
-uv run pytest -v      # 306 tests, all mocked/local — no live credentials needed to run the suite
+uv run pytest -v      # 399 tests, all mocked/local — no live credentials needed to run the suite
 ```
 
 ## Project layout
 
 ```
 shared/ledger_schema/   # RawFact (connector-writable) / LedgerRecord (ledger-core-only) — the shared schema
-ledger_core/            # Ledger MCP server: append-only log, confidence, coverage, live queries
+ledger_core/            # Ledger MCP server: append-only log, confidence, coverage, ownership, drafts, briefing
 connectors/
   git_repo/              # Sensor: local git "last touched" metadata — no credentials needed
   ticketing/              # Sensor: ServiceNow Table API (incidents/tasks)
   calendar_google/         # Sensor: Google Calendar API v3
   cmdb/                     # Sensor: ServiceNow Table API (configuration items)
+ops/                     # Scheduled headless invocation wrapper + failure logging (AD-7)
 tests/                   # One test file per module, httpx.MockTransport for every HTTP connector
 ledger_data/             # Runtime state: append-only per-artifact-type logs (git-committed, human-readable)
+.mcp.json                # Project-scoped registration of ledger-core + all four connector servers
 _bmad-output/            # Planning artifacts, spec, architecture, per-story specs, deferred-work log
 ```
 

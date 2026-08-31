@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "ledger-core": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "ledger_core.server"]
+    },
+    "git-repo": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "connectors.git_repo.server"]
+    },
+    "ticketing": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "connectors.ticketing.server"]
+    },
+    "calendar-google": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "connectors.calendar_google.server"]
+    },
+    "cmdb": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "connectors.cmdb.server"]
+    }
+  }
+}
