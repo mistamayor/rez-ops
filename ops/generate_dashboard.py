@@ -17,7 +17,7 @@ import html
 import sys
 from pathlib import Path
 
-from ledger_core.briefing import get_briefing
+from ledger_core.briefing import Briefing, get_briefing
 from ledger_core.drafts import Draft
 from ledger_core.log import DEFAULT_LEDGER_DATA_DIR
 from ledger_core.projection import LOG_FORMAT_ERROR_MARKER, get_coverage_map
@@ -112,55 +112,220 @@ def _render_issues_list(data_quality_issues: dict[str, dict[str, int]]) -> str:
     return f"<ul>{items}</ul>"
 
 
+def _severity_class(count: int, *, bad_when_nonzero: bool) -> str:
+    """A stat tile's color signals whether its count needs attention.
+
+    `bad_when_nonzero=True` for counts that are always a problem (orphan-risk,
+    unknown-confidence, data-quality issues) -- zero is good, anything else
+    is a warning/critical. `bad_when_nonzero=False` for counts that are just
+    informational (types tracked, pending drafts) -- neutral regardless.
+    """
+    if not bad_when_nonzero:
+        return "sev-neutral"
+    return "sev-ok" if count == 0 else "sev-warn"
+
+
+def _render_stat_strip(coverage: dict[str, dict[str, int]], briefing: Briefing) -> str:
+    n_issues = len(briefing.data_quality_issues)
+    tiles = [
+        ("Types tracked", len(coverage), "sev-neutral"),
+        ("Orphan-risk", len(briefing.orphan_risk), _severity_class(len(briefing.orphan_risk), bad_when_nonzero=True)),
+        ("Unknown confidence", len(briefing.unknown_confidence), _severity_class(len(briefing.unknown_confidence), bad_when_nonzero=True)),
+        ("Pending drafts", len(briefing.pending_drafts), "sev-neutral"),
+        ("Data quality issues", n_issues, "sev-critical" if n_issues else "sev-ok"),
+    ]
+    cells = "".join(
+        f'<div class="stat {sev}"><span class="stat-value">{count}</span>'
+        f'<span class="stat-label">{_esc(label)}</span></div>'
+        for label, count, sev in tiles
+    )
+    return f'<div class="stat-strip">{cells}</div>'
+
+
 _PAGE_TEMPLATE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Rez Ops Dashboard</title>
 <style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 960px;
-          margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }}
-  h1 {{ margin-bottom: 0; }}
-  .generated-at {{ color: #767676; font-size: 0.9rem; margin-top: 0.25rem; }}
-  section {{ margin-top: 2.5rem; }}
-  h2 {{ border-bottom: 2px solid #ccc; padding-bottom: 0.3rem; }}
-  table {{ border-collapse: collapse; width: 100%; margin-top: 0.75rem; }}
-  th, td {{ text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #ddd; }}
-  th {{ background: rgba(127,127,127,0.15); }}
-  .empty {{ color: #767676; font-style: italic; }}
-  .error-row {{ background: rgba(220, 50, 47, 0.15); }}
-  .badge {{ display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
-            font-size: 0.8rem; background: rgba(127,127,127,0.18); }}
+  :root {{
+    color-scheme: light dark;
+    --bg: #f3f1ec;
+    --surface: #ffffff;
+    --border: #ddd8cd;
+    --text: #1f2430;
+    --muted: #6b7080;
+    --accent: #c97a1f;
+    --ok: #2f8a63;
+    --warn: #c97a1f;
+    --critical: #b8422f;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --bg: #12151b;
+      --surface: #1a1e26;
+      --border: #262b35;
+      --text: #e5e8ee;
+      --muted: #8891a3;
+      --accent: #e0983a;
+      --ok: #49b087;
+      --warn: #e0983a;
+      --critical: #d15a4d;
+    }}
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 4rem;
+    line-height: 1.5;
+  }}
+  .mono {{
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }}
+  header.top {{
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }}
+  h1 {{
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 1.4rem;
+    letter-spacing: 0.02em;
+    margin: 0;
+    text-wrap: balance;
+  }}
+  .meta {{
+    color: var(--muted);
+    font-size: 0.85rem;
+  }}
+  .stat-strip {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-top: 1.75rem;
+  }}
+  .stat {{
+    background: var(--surface);
+    padding: 1.1rem 1.2rem;
+    border-top: 3px solid var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }}
+  .stat.sev-ok {{ border-top-color: var(--ok); }}
+  .stat.sev-warn {{ border-top-color: var(--warn); }}
+  .stat.sev-critical {{ border-top-color: var(--critical); }}
+  .stat-value {{
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 1.9rem;
+    font-weight: 600;
+  }}
+  .stat-label {{
+    color: var(--muted);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }}
+  section {{ margin-top: 2rem; }}
+  .card {{
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.25rem 1.4rem 1.4rem;
+  }}
+  .eyebrow {{
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }}
+  h2 {{
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0;
+  }}
+  .table-scroll {{ overflow-x: auto; margin-top: 0.9rem; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 0.92rem; }}
+  th, td {{ text-align: left; padding: 0.5rem 0.7rem; border-bottom: 1px solid var(--border); white-space: nowrap; }}
+  th {{
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    font-weight: 500;
+  }}
+  tbody tr:last-child td {{ border-bottom: none; }}
+  .empty {{
+    color: var(--muted);
+    font-style: italic;
+    margin: 0.9rem 0 0;
+    padding: 0.9rem;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    font-size: 0.9rem;
+  }}
+  .error-row td {{ color: var(--critical); }}
+  ul {{ margin: 0.9rem 0 0; padding-left: 1.2rem; }}
+  li {{ color: var(--critical); }}
 </style>
 </head>
 <body>
-<h1>Rez Ops Dashboard</h1>
-<p class="generated-at">Snapshot generated {generated_at} &middot; ledger dir: {ledger_dir}</p>
+<header class="top">
+  <h1>REZ OPS // DASHBOARD</h1>
+  <p class="meta mono">generated {generated_at} &middot; ledger dir: {ledger_dir}</p>
+</header>
+
+{stat_strip}
 
 <section>
-<h2>Coverage <span class="badge">{n_types} artifact type(s)</span></h2>
-{coverage_table}
+<div class="card">
+<div class="eyebrow"><h2>Coverage</h2></div>
+<div class="table-scroll">{coverage_table}</div>
+</div>
 </section>
 
 <section>
-<h2>Orphan-risk <span class="badge">{n_orphan}</span></h2>
-{orphan_table}
+<div class="card">
+<div class="eyebrow"><h2>Orphan-risk</h2></div>
+<div class="table-scroll">{orphan_table}</div>
+</div>
 </section>
 
 <section>
-<h2>Unknown confidence <span class="badge">{n_unknown}</span></h2>
-{unknown_table}
+<div class="card">
+<div class="eyebrow"><h2>Unknown confidence</h2></div>
+<div class="table-scroll">{unknown_table}</div>
+</div>
 </section>
 
 <section>
-<h2>Pending drafts <span class="badge">{n_drafts}</span></h2>
-{drafts_table}
+<div class="card">
+<div class="eyebrow"><h2>Pending drafts</h2></div>
+<div class="table-scroll">{drafts_table}</div>
+</div>
 </section>
 
 <section>
-<h2>Data quality issues <span class="badge">{n_issues}</span></h2>
+<div class="card">
+<div class="eyebrow"><h2>Data quality issues</h2></div>
 {issues_list}
+</div>
 </section>
 
 </body>
@@ -189,19 +354,15 @@ def generate_dashboard(
     page = _PAGE_TEMPLATE.format(
         generated_at=_esc(briefing.generated_at),
         ledger_dir=_esc(ledger_dir),
-        n_types=len(coverage),
+        stat_strip=_render_stat_strip(coverage, briefing),
         coverage_table=_render_coverage_table(coverage),
-        n_orphan=len(briefing.orphan_risk),
         orphan_table=_render_record_table(
             briefing.orphan_risk, "No orphan-risk artifacts."
         ),
-        n_unknown=len(briefing.unknown_confidence),
         unknown_table=_render_record_table(
             briefing.unknown_confidence, "No unknown-confidence artifacts."
         ),
-        n_drafts=len(briefing.pending_drafts),
         drafts_table=_render_drafts_table(briefing.pending_drafts),
-        n_issues=len(briefing.data_quality_issues),
         issues_list=_render_issues_list(briefing.data_quality_issues),
     )
 

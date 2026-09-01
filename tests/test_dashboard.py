@@ -50,8 +50,8 @@ def test_orphan_risk_artifact_appears_in_orphan_section(tmp_path: Path) -> None:
     html_text = output_path.read_text(encoding="utf-8")
     assert "runbooks" in html_text
     assert "payments" in html_text
-    # The orphan-risk badge count reflects exactly one artifact.
-    assert '<h2>Orphan-risk <span class="badge">1</span></h2>' in html_text
+    # The orphan-risk stat tile reflects exactly one artifact.
+    assert '<span class="stat-value">1</span><span class="stat-label">Orphan-risk</span>' in html_text
 
 
 def test_owned_artifact_is_excluded_from_orphan_risk(tmp_path: Path) -> None:
@@ -70,7 +70,7 @@ def test_owned_artifact_is_excluded_from_orphan_risk(tmp_path: Path) -> None:
     generate_dashboard(ledger_dir=ledger_dir, output_path=output_path)
 
     html_text = output_path.read_text(encoding="utf-8")
-    assert '<h2>Orphan-risk <span class="badge">0</span></h2>' in html_text
+    assert '<span class="stat-value">0</span><span class="stat-label">Orphan-risk</span>' in html_text
 
 
 def test_pending_draft_appears_with_unresolved_recipient(tmp_path: Path) -> None:
@@ -88,7 +88,7 @@ def test_pending_draft_appears_with_unresolved_recipient(tmp_path: Path) -> None
     generate_dashboard(ledger_dir=ledger_dir, output_path=output_path)
 
     html_text = output_path.read_text(encoding="utf-8")
-    assert '<h2>Pending drafts <span class="badge">1</span></h2>' in html_text
+    assert '<span class="stat-value">1</span><span class="stat-label">Pending drafts</span>' in html_text
     assert "Please review" in html_text
     assert "— unresolved —" in html_text
 
@@ -108,7 +108,7 @@ def test_corrupted_log_surfaces_in_coverage_and_data_quality_sections(
     html_text = output_path.read_text(encoding="utf-8")
     assert "broken_type" in html_text
     assert "corrupted log" in html_text
-    assert '<h2>Data quality issues <span class="badge">1</span></h2>' in html_text
+    assert '<span class="stat-value">1</span><span class="stat-label">Data quality issues</span>' in html_text
 
 
 def test_dynamic_content_is_html_escaped(tmp_path: Path) -> None:
