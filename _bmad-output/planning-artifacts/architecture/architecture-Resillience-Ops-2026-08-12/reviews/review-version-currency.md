@@ -1,77 +1,43 @@
----
-review: version-currency
-target: ARCHITECTURE-SPINE.md (Rez Ops)
-target_path: '_bmad-output/planning-artifacts/architecture/architecture-Resillience-Ops-2026-08-12/ARCHITECTURE-SPINE.md'
-lens: "Verify every committed decision was web-researched or reality-checked rather than asserted from training data: current library/framework versions, that each named technology still exists and fits, and — greenfield — the live defaults of any starter it leans on. Flag anything that could be out of date and wasn't confirmed against the web, the existing project, or the current starter."
-date: '2026-08-12'
-verdict: CHANGES-REQUESTED
----
+# Version-Currency Review — Rez Ops Architecture Spine (AD-11/AD-12 pass)
 
-# Version-Currency Review — Rez Ops Architecture Spine
+**Reviewed:** ARCHITECTURE-SPINE.md, `updated: 2026-09-05`
+**Scope:** this pass covers only what's new since the 2026-08-12 baseline — AD-11 (Evidence boundary), AD-12 (ActionProposal and the Policy Engine), and the small amendments to AD-1 and AD-6 that reference them. AD-1 through AD-10 and the Stack table were verified in the prior (2026-08-12) pass and are re-examined here only where the new ADs might contradict them.
+**Method:** re-read the spine in full; enumerated every named technology/library/format/protocol claim inside AD-11, AD-12, and the AD-1/AD-6 amendments; web-searched to reality-check the one area where those ADs touch external tooling (MCP's own approval/annotation primitives), and spot-re-confirmed the `mcp` SDK pin since AD-12 leans on ledger-core MCP tool calls.
 
 ## Verdict
 
-**Changes required.** One claim in the Stack table is not just unverified but demonstrably wrong once checked against Claude Code's own documentation: the documented headless invocation (`claude -p --bare --output-format json`) will not load the MCP servers the entire architecture is built around. Everything else in the Stack table checks out or is a defensible, if unstated, judgment call. This looks like a partial research pass — the `mcp` SDK pin was clearly checked against the web (it's accurate to the day), but the Claude Code headless flags were not reality-checked against Claude Code's own `--bare` semantics.
+**PASS.** AD-11 and AD-12 introduce no new external library, framework, file format, or protocol — `EvidenceBundle`, `ActionProposal`, and `rezops.policy.yaml` are Rez-Ops-internal schema/config additions layered on the Stack table's already-verified Python/`mcp`-SDK/git substrate, so there is nothing new here that required (and was skipped on) web verification. One soft gap is worth recording: AD-12's custom approval-gating design isn't shown to have been reality-checked against MCP's own native tool-annotation and elicitation primitives, which already exist in the pinned SDK and address an overlapping concern.
 
-## Method
+## What AD-11/AD-12 actually assert, checked line by line
 
-Independently web-searched each named technology/version rather than trusting the spine's "researched earlier the same day" claim, per this gate's mandate. Checked: PyPI/GitHub release history for the `mcp` Python SDK, the MCP spec/SDK v2 announcement, Claude Code's official headless-mode docs and CLI reference, Python's release/EOL schedule, and whether any starter/scaffold is implicated by the design (none is).
+| Claim in AD-11/AD-12 | External tech named? | Verification needed? |
+| --- | --- | --- |
+| `EvidenceBundle` shape (`claim`, `confidence: float 0–1`, `evidence: list[EvidenceRef]`, `reasoning`, `generated_at`) | No — new internal schema type in the existing shared schema module (AD-4/AD-9) | No — pure project-internal design, not a version-currency claim |
+| `EvidenceRef` cites a `RawFact.source` or `LedgerRecord` field, never inlining content | No — internal convention | No |
+| One file per bundle at `ledger_data/evidence/{evidence_id}.md` | No — filesystem convention, mirrors AD-6's existing `drafts/` mechanism | No |
+| `ActionProposal` shape (`action`, `target`, `reason`, `evidence`, `impact`, `policy_decision`) | No — new internal schema type | No |
+| Fixed vocabulary of action identifiers ("never freeform") | Implicit reliance on JSON-schema `enum`/`Literal` support in MCP tool input schemas | Checked — the pinned `mcp` 1.29.x Python SDK builds tool input schemas from Pydantic models, which support `Literal`/enum constraints; this is ordinary, unversioned JSON Schema capability, not a new dependency |
+| `policy_decision` (`automatic` \| `requires_approval` \| `denied`) computed by ledger-core from `rezops.policy.yaml` | No — new config file, same mechanism class as the already-verified `rezops.config.yaml` | No |
+| "No executor exists in this phase" / nothing calls an external write/send API | No — a *non*-claim (explicitly deferred), nothing to verify | No |
+| AD-1 amendment: "Read-only by default; action is an explicit, separately-gated capability" | No | No |
+| AD-6 amendment: `ActionProposal` is a distinct shape from `Draft`, never a variant of it | No | No |
+
+No row above names a new dependency, data format, or protocol outside what the Stack table already covers (Python, `mcp` SDK, Claude Code, git). So the primary risk this review type looks for — a committed decision asserted from training data about *external* tech — doesn't arise in the new material; the new ADs are internal-design decisions, not technology-adoption decisions.
 
 ## Findings
 
-### 1. CRITICAL — `--bare` will not load the MCP servers the headless path depends on
+1. **[Info / re-confirmed, not new] The `mcp` SDK `<2` pin is still correct and current.** Re-checked since AD-12 leans on ledger-core MCP tool calls for policy evaluation: the MCP Python SDK v2 line went stable on 2026-07-27/28 alongside the 2026-07-28 spec revision, and `pip install mcp` now resolves to 2.x by default — so the Stack table's explicit `mcp` pin at `1.29.x, <2` remains necessary, not just accurate as of the prior pass. v1.x continues to receive security/bugfix patches per the SDK's own docs. This isn't a new AD-11/12 claim, but it's the one place the new ADs touch the already-verified Stack row, so it was worth re-touching rather than assuming. No contradiction found.
+   Sources: [MCP Python SDK — PyPI](https://pypi.org/project/mcp/), [Beta SDKs for the 2026-07-28 MCP Spec Release Candidate](https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/), [modelcontextprotocol/python-sdk releases](https://github.com/modelcontextprotocol/python-sdk/releases)
 
-**Claim (Stack table, AD-7):** `claude -p --bare --output-format json` is the mechanism by which the OS scheduler (cron/launchd) invokes the runtime headlessly to do things like a daily briefing.
+2. **[Low-Medium, documentation gap rather than an error] AD-12's approval-gating design doesn't note whether it considered MCP's own native tool-annotation/elicitation primitives.** MCP already ships `readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint` tool annotations (since the 2025-03-26 spec revision) and an `elicitation` capability for mid-session user confirmation (since 2025-06-18) — both available in the pinned `mcp` 1.29.x SDK today. AD-12 builds a fully custom, ledger-core-resolved policy engine instead. That's a defensible and arguably *stronger* choice — the MCP project's own blog is explicit that annotation hints "do not replace authorization, confirmation, rate limits, input validation, or server-side policy checks," which is exactly the gap AD-12's server-side `policy_decision` fills — but the spine doesn't record that this native alternative was looked at and found insufficient for the trust-layer guarantee AD-12 exists to provide (client-supplied hints are explicitly documented as untrusted unless the server itself is trusted, whereas AD-12's decision is computed server-side by ledger-core itself). Recommend a one-line addition to AD-12 or the Deferred section noting this was a deliberate choice, so a future reader doesn't mistake the omission for an unresearched gap.
+   Sources: [Tool Annotations as Risk Vocabulary](https://blog.modelcontextprotocol.io/posts/2026-03-16-tool-annotations/), [Testing MCP Tool Annotations (July 2026)](https://sunpeak.ai/blogs/testing-mcp-tool-annotations/)
 
-**Reality (Claude Code official headless docs, code.claude.com/docs/en/headless):**
-> "Add `--bare` to reduce startup time by **skipping auto-discovery of hooks, skills, plugins, MCP servers, auto memory, and CLAUDE.md**... A hook in a teammate's `~/.claude` or **an MCP server in the project's `.mcp.json` won't run, because bare mode never reads them.**"
+3. **[Info] AD-1 and AD-6 amendments add no new external claims.** Both amendments only cross-reference the new AD-11/AD-12 object shapes (`EvidenceBundle`, `ActionProposal`) and restate existing AD-5/AD-6 ownership rules; nothing in either amendment names a technology, version, or format that wasn't already covered by the original AD-1/AD-6 text or the Stack table.
 
-This is a direct contradiction of the architecture's own design. The Voice layer's entire job in a scheduled run is to call the Sensors (calendar/ticketing/git/CMDB) and Ledger-Core MCP servers registered in `.mcp.json` (per the Consistency Conventions row: "Connector/config lives in `.mcp.json` + `rezops.config.yaml`"). As literally specified, the cron-triggered command in AD-7 would start a bare Claude Code session with **no MCP servers attached at all** — no Sensors, no Ledger-Core — because `--bare` never reads `.mcp.json`. A scheduled daily briefing built this way would produce no ledger-backed output; it would silently degrade to a plain LLM call with only Bash/Read/Edit tools.
+4. **[Info] No greenfield-starter angle applies to this pass.** AD-11/AD-12 don't touch scaffolding, a project generator, or any starter template's defaults — the "greenfield: live defaults of any starter it leans on" check in the task brief doesn't have a target in this diff; the spine has no starter/scaffold dependency anywhere (confirmed by re-scanning the Stack and Structural Seed sections, unchanged from the prior pass).
 
-The docs also give the fix, which the spine should incorporate: MCP servers must be passed explicitly even in bare mode via `--mcp-config <file-or-json>`. The corrected headless invocation is something like `claude -p --bare --mcp-config .mcp.json --output-format json`, not the flag combination currently in the spine.
+5. **[Info] Internal-consistency spot-check, not version currency, but noted while reading:** AD-11/AD-12's typing style (`list[EvidenceRef]`, `list[EvidenceBundle ref]`) matches PEP 585 generic-alias syntax, valid on the Stack table's Python 3.13+ floor — consistent, no action needed.
 
-This was checkable in one docs read and was not caught — a strong signal the "researched earlier the same day" pass did not reality-check the specific flag combination against Claude Code's own semantics, only that the flags individually exist.
+## What was NOT re-verified (by design, per instructions)
 
-**Recommendation:** Add `--mcp-config` (or equivalent) to the documented headless command in the Stack table and AD-7, or explicitly note that the scheduled path must not use `--bare` if minimal-config MCP loading isn't wired up another way.
-
-### 2. MEDIUM — `--bare` mode forces API-key auth, disabling OAuth/subscription login
-
-**Reality (same doc):** "In bare mode, Claude Code never reads OAuth credentials or the system keychain. For the Anthropic API, set `ANTHROPIC_API_KEY` in the environment... or supply an `apiKeyHelper`."
-
-AD-7 frames Rez Ops as local-first and low-friction ("no hosted database... just a laptop and a git remote"), and the interactive path presumably uses the program owner's normal Claude Code login. But the scheduled/headless path via `--bare` cannot use that same OAuth session — it needs a separately provisioned `ANTHROPIC_API_KEY` (i.e., pay-as-you-go API billing, not the subscription the interactive session may be using). This operational fork (two auth paths, two billing models) is a real consequence of the chosen flag and isn't surfaced anywhere in the spine. Worth a line in AD-7 or the Stack table so it isn't discovered at implementation time.
-
-### 3. MEDIUM — Python floor ("3.12+") is not the current line and isn't justified
-
-Verified via web search:
-- Python 3.12's full bugfix support ended **April 2025**; it has been in **security-only maintenance** since, through EOL **October 2028**.
-- Python 3.13 is the actively bugfixed stable line (3.13.15 shipped Aug 5, 2026); **Python 3.14** is the current newest release (3.14.7, Aug 5, 2026); 3.15 is already in release-candidate.
-- The `mcp` Python SDK only requires `>=3.10`, so nothing forces the 3.12 floor.
-
-"3.12+" isn't wrong (it still exists, is supported until 2028, and satisfies the SDK's floor), but for a greenfield project starting today it reads like a remembered "safe modern default" rather than a checked one — there's no note on why 3.12 was picked over the actively-maintained 3.13/3.14 baseline. Recommend either bumping the floor to 3.13+ or adding a one-line rationale (e.g., "3.12 chosen for X library compatibility") so this isn't an unexamined carry-over from training data.
-
-### 4. LOW — Claude Code reference runtime has no version floor despite version-gated behavior
-
-The Stack table pins Python and `mcp` to specific ranges but gives Claude Code only as "current." Confirmed via Claude Code's own docs/changelog that several behaviors this architecture will lean on are version-gated (e.g., `--bare` itself landed at v2.1.81; the `mcp_server_errors`/`mcp_servers` fields in `system/init` used to verify a connector actually loaded require v2.1.219+; the `--mcp-config` startup-wait behavior needs v2.1.221+). None of this breaks the architecture, but "current" isn't independently reproducible the way the other two pins are — worth stating the minimum Claude Code version the design assumes, especially since it's needed to make Finding #1's fix observable/verifiable (checking `mcp_server_errors` in the JSON output to confirm the ledger/connector servers actually loaded on each cron run).
-
-## Confirmed as correctly researched (no action needed)
-
-- **`mcp` Python SDK, `1.29.x` pinned `<2`.** Verified against GitHub releases/PyPI: `1.29.0` and the stable `2.0.0` GA both shipped **2026-07-28** — the same date the spine's own Deferred section cites for the v2 MCP spec/SDK release. `pip install mcp` now defaults to 2.x, which makes the explicit `<2` pin not just accurate but load-bearing (an unpinned install today would silently pull v2 and break every SDK call the low-level `Server`/`ServerSession` code in this architecture would use). This is exactly the kind of decision the gate is looking for: current, dated, and defensible.
-- **`mcp` technology still exists and fits** — actively maintained, official SDK, is the correct choice for the Sensors/Ledger MCP-server design.
-- **git as sole persistence layer** — not a version-currency risk; no version is pinned or needs to be, and git's continued existence/fitness for an append-only, git-committed ledger isn't in question.
-
-## Not applicable
-
-- **Greenfield starter defaults:** the lens asks to check the live defaults of any starter the design leans on. No scaffold/starter (e.g. `create-mcp-server`, cookiecutter, `uv init` template) is referenced anywhere in the spine — the design is a hand-rolled layout on top of the raw `mcp` SDK, not bootstrapped from a template. There is nothing to reality-check here, so this is a clean N/A rather than a silent gap — but if implementation later reaches for the official quickstart scaffold, its defaults (stdio transport, `FastMCP`-style decorators) should be checked against AD-2/AD-4 at that point since they weren't checked now.
-
-## Sources consulted
-
-- https://github.com/modelcontextprotocol/python-sdk/releases (release dates for 1.28.x/1.29.0/2.0.0)
-- https://github.com/modelcontextprotocol/python-sdk/releases/tag/v2.0.0
-- https://blog.modelcontextprotocol.io/posts/sdk-betas-2026-07-28/
-- https://pypi.org/project/mcp/
-- https://libraries.io/pypi/mcp
-- https://code.claude.com/docs/en/headless.md (official `--bare`, `-p`, `--output-format json`, `--mcp-config` semantics)
-- https://github.com/anthropics/claude-code/issues/36852 (`--bare` documentation-gap issue, corroborates skip list)
-- https://www.npmjs.com/package/@anthropic-ai/claude-code and Claude Code changelog sources (current CLI version line, v2.1.x)
-- https://www.python.org/downloads/ and blog.python.org release posts (3.12/3.13/3.14/3.15 status as of Aug 2026)
-- endoflife/HeroDevs Python EOL schedule summaries (3.12 support phase)
+AD-1 through AD-10, the Consistency Conventions table, and the Stack table's Python/Claude-Code/git rows were treated as already reality-checked in the 2026-08-12 pass and were not re-researched here, since AD-11/AD-12 don't contradict any of them — they extend AD-5's "ledger-core owns derived computation" principle and AD-6's draft/write-boundary mechanism rather than revising them.

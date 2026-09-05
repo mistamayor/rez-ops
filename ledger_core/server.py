@@ -1,20 +1,36 @@
 """Ledger-core MCP server (AD-1, AD-2): ledger-core is its own MCP server.
 
-Exposes seven tools: a read/query surface over projection.py
+Exposes eleven tools: a read/query surface over projection.py
 (`ledger_get_record`, `ledger_get_coverage`, `ledger_list_records`), the one
 and only ingestion path into the append-only log (`ledger_ingest_raw_fact`),
 the draft-not-send outbound content queue over drafts.py
-(`ledger_create_draft`, `ledger_list_drafts` -- AD-6, CAP-6, Story 9), and the
+(`ledger_create_draft`, `ledger_list_drafts` -- AD-6, CAP-6, Story 9), the
 periodic briefing over briefing.py (`ledger_get_briefing` -- CAP-7, Story
-10). Ledger state can only ever be changed by appending to the log (AD-3) --
-`ledger_ingest_raw_fact` constructs a `RawFact` and calls `append_event`; it
-has no other side effect and no `confidence` parameter (confidence is
-computed exclusively by `projection.get_record`, AD-5). `ledger_create_draft`
-is the only other tool with a write side effect -- it writes exactly one new
-file under `ledger_data/drafts/` and calls no external send/write API of any
-kind (AD-6). `ledger_get_briefing`, like every other read tool here, performs
-no write of any kind -- it composes `get_record`/`list_records`/`list_drafts`/
-`get_coverage_map`'s own results, nothing more.
+10), the evidence-backed-claims queue over evidence.py
+(`ledger_create_evidence`, `ledger_list_evidence` -- AD-11, CAP-9, Story 12),
+and the policy-gated action-proposal queue over action_proposals.py
+(`ledger_create_action_proposal`, `ledger_list_action_proposals` -- AD-12,
+CAP-10, Story 13). Ledger state can only ever be changed by appending to the
+log (AD-3) -- `ledger_ingest_raw_fact` constructs a `RawFact` and calls
+`append_event`; it has no other side effect and no `confidence` parameter
+(confidence is computed exclusively by `projection.get_record`, AD-5).
+`ledger_create_draft`, `ledger_create_evidence`, and
+`ledger_create_action_proposal` are the only other tools with a write side
+effect -- each writes exactly one new file, or appends exactly two new log
+lines (under `ledger_data/drafts/`, `ledger_data/evidence/`, or
+`ledger_data/action_proposals.log.md` respectively) and calls no external
+send/write API of any kind, and no other component's write path, of any kind
+(AD-6, AD-11, AD-12). Neither `ledger_create_evidence` nor
+`ledger_list_evidence` accepts a `confidence` parameter -- confidence is
+computed exclusively by `evidence.create_evidence_bundle`, from the cited
+evidence, never accepted as input (AD-11). Neither
+`ledger_create_action_proposal` nor `ledger_list_action_proposals` accepts an
+`impact` or `policy_decision` parameter -- both are computed exclusively by
+`action_proposals.create_action_proposal`, never accepted as input (AD-12).
+`ledger_get_briefing`, like every other read tool here, performs no write of
+any kind -- it composes
+`get_record`/`list_records`/`list_drafts`/`get_coverage_map`'s own results,
+nothing more.
 """
 
 from __future__ import annotations
@@ -23,8 +39,20 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from ledger_core.action_proposals import (
+    ActionProposal,
+    create_action_proposal,
+    list_action_proposals,
+)
 from ledger_core.briefing import get_briefing
 from ledger_core.drafts import Draft, create_draft, list_drafts
+from ledger_core.evidence import (
+    EvidenceBundle,
+    EvidenceRef,
+    EvidenceValidationError,
+    create_evidence_bundle,
+    list_evidence,
+)
 from ledger_core.log import append_event
 from ledger_core.projection import get_coverage_map, get_record, list_records
 from shared.ledger_schema import LedgerRecord, RawFact
@@ -68,6 +96,50 @@ def _draft_to_dict(draft: Draft) -> dict[str, Any]:
         "body": draft.body,
         "recipient": draft.recipient,
         "created_at": draft.created_at,
+    }
+
+
+def _action_proposal_to_dict(proposal: ActionProposal) -> dict[str, Any]:
+    """The one ActionProposal-to-dict shape both action-proposal tools serialize.
+
+    Shared by `ledger_create_action_proposal` and `ledger_list_action_proposals`
+    so a future `ActionProposal` field only needs to be added here once.
+    """
+    return {
+        "proposal_id": proposal.proposal_id,
+        "action": proposal.action,
+        "target_artifact_type": proposal.target_artifact_type,
+        "target_artifact_id": proposal.target_artifact_id,
+        "reason": proposal.reason,
+        "evidence": list(proposal.evidence),
+        "impact": proposal.impact,
+        "policy_decision": proposal.policy_decision,
+        "proposed_at": proposal.proposed_at,
+        "decided_at": proposal.decided_at,
+    }
+
+
+def _evidence_bundle_to_dict(bundle: EvidenceBundle) -> dict[str, Any]:
+    """The one EvidenceBundle-to-dict shape both evidence tools serialize.
+
+    Shared by `ledger_create_evidence` and `ledger_list_evidence` so a future
+    `EvidenceBundle` field only needs to be added here once.
+    """
+    return {
+        "evidence_id": bundle.evidence_id,
+        "claim": bundle.claim,
+        "confidence": bundle.confidence,
+        "evidence": [
+            {
+                "artifact_type": ref.artifact_type,
+                "artifact_id": ref.artifact_id,
+                "source": ref.source,
+                "field": ref.field,
+            }
+            for ref in bundle.evidence
+        ],
+        "reasoning": bundle.reasoning,
+        "generated_at": bundle.generated_at,
     }
 
 
@@ -252,6 +324,79 @@ def ledger_list_drafts(
     return [_draft_to_dict(draft) for draft in drafts]
 
 
+@mcp.tool(name="ledger_create_evidence")
+def ledger_create_evidence(
+    claim: str,
+    reasoning: str,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create one EvidenceBundle and write it to `ledger_data/evidence/`.
+
+    `evidence` is a list of structured citation objects -- each an
+    `{"artifact_type": ..., "artifact_id": ..., "source": ...}` or
+    `{"artifact_type": ..., "artifact_id": ..., "field": ...}` dict, never a
+    bare string or other non-dict item (checked explicitly here, before
+    anything is written, and raises `EvidenceValidationError` rather than an
+    unguarded `AttributeError` from calling `.get(...)` on it) -- exactly one
+    of `source`/`field` set per citation. Each dict is then constructed into
+    an `EvidenceRef`, which raises `EvidenceValidationError` (surfaced as a
+    structured, non-crashing MCP error, the same mechanism proven for every
+    other tool here) if that invariant is violated, before anything is
+    written.
+
+    This tool signature has **no `confidence` parameter at all** -- a caller
+    cannot pass one through, let alone have it accepted (AD-11). `confidence`
+    is computed exclusively by `evidence.create_evidence_bundle`, as the
+    fraction of citations that resolve against current ledger state: a
+    source-citation resolves if that artifact's log has an event with that
+    exact `source`; a field-citation resolves if
+    `ledger_core.projection.get_record` reports a non-empty value for that
+    field. A bundle citing nothing that resolves is still created, with
+    `confidence: 0.0` -- never rejected, matching this project's standing
+    refusal to hide bad states rather than surface them.
+
+    `claim`/`reasoning` must each be non-empty, non-whitespace-only strings;
+    `evidence` must be a non-empty list. Any violation raises a typed,
+    non-crashing MCP error and writes nothing. `claim`/`reasoning` content is
+    never inspected or templated beyond that blank check -- opaque
+    caller-supplied text, exactly like `ledger_create_draft`'s
+    `subject`/`body`.
+    """
+    refs = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            raise EvidenceValidationError(
+                "each evidence citation must be a "
+                '{"artifact_type": ..., "artifact_id": ..., "source"-or-"field": ...} '
+                f"object, not {type(item).__name__}"
+            )
+        refs.append(
+            EvidenceRef(
+                artifact_type=item.get("artifact_type"),
+                artifact_id=item.get("artifact_id"),
+                source=item.get("source"),
+                field=item.get("field"),
+            )
+        )
+    bundle = create_evidence_bundle(
+        claim=claim, reasoning=reasoning, evidence=tuple(refs)
+    )
+    return _evidence_bundle_to_dict(bundle)
+
+
+@mcp.tool(name="ledger_list_evidence")
+def ledger_list_evidence() -> list[dict[str, Any]]:
+    """List every EvidenceBundle under `ledger_data/evidence/`.
+
+    Read-only: never mutates a bundle file. Returns `[]` -- never raises --
+    when `ledger_data/evidence/` doesn't exist yet (no bundle has ever been
+    created). If one bundle file is corrupted, it is represented by exactly
+    one sentinel entry rather than aborting the whole listing (AD-8,
+    mirroring `ledger_list_drafts`'s identical isolation).
+    """
+    return [_evidence_bundle_to_dict(bundle) for bundle in list_evidence()]
+
+
 @mcp.tool(name="ledger_get_briefing")
 def ledger_get_briefing() -> dict[str, Any]:
     """Return the periodic briefing: what needs a decision today (CAP-7, Story 10).
@@ -292,6 +437,75 @@ def ledger_get_briefing() -> dict[str, Any]:
         },
         "generated_at": briefing.generated_at,
     }
+
+
+@mcp.tool(name="ledger_create_action_proposal")
+def ledger_create_action_proposal(
+    action: str,
+    target_artifact_type: str,
+    target_artifact_id: str,
+    reason: str,
+    evidence: list[str],
+) -> dict[str, Any]:
+    """Propose one system-state-changing action and record ledger-core's policy decision (AD-12, CAP-10, Story 13).
+
+    `action` must be a key declared in `rezops.policy.yaml` -- never
+    freeform, never any other source; naming anything else raises
+    `ActionProposalValidationError` (surfaced as a structured, non-crashing
+    MCP error, the same mechanism proven for every other tool here) and
+    writes nothing. `evidence` is a list of `EvidenceBundle.evidence_id`
+    strings -- must be non-empty, and every id must resolve to a bundle that
+    actually exists (`ledger_core.evidence.list_evidence`); citing zero, or
+    an id that doesn't exist, is likewise rejected before anything is
+    written. `target_artifact_type`/`target_artifact_id` are validated
+    against the same identifier charset every other component enforces, with
+    no requirement that the target actually exist beyond resolving its
+    (possibly empty/unknown) `LedgerRecord` -- the same non-validation
+    precedent `ledger_create_draft` already established for its own
+    `artifact_type`/`artifact_id`. `reason` must be non-empty and
+    non-whitespace-only.
+
+    This tool signature has **no `impact` and no `policy_decision`
+    parameter at all** -- a caller cannot pass either through, let alone
+    have it accepted (AD-12). `impact` is copied from the named action's
+    config-declared value in `rezops.policy.yaml`; `policy_decision`
+    (`automatic`/`requires_approval`/`denied`) is computed from that
+    `impact`, the **minimum** confidence across every cited `EvidenceBundle`
+    (never an average), and whether the target's `tier_sla` is currently
+    known (`ledger_core.projection.get_record` -- always `None` against
+    today's real data, AD-9, so `automatic` is never actually expected to
+    fire yet -- an honest v1 characteristic, not a bug).
+
+    The only side effect is appending exactly two new lines -- a `proposed`
+    event immediately followed by a `decided` event -- to the single,
+    project-wide, git-tracked `ledger_data/action_proposals.log.md` (AD-3,
+    AD-12). Nothing here, or anywhere else in this tool's call graph,
+    consumes the resulting `policy_decision` to actually perform the
+    action -- no external write/send API call, no internally-triggered
+    `Draft` creation, no other component's write path. There is no separate,
+    later human-approval step in this phase, and no update/resubmission
+    tool: creating a proposal always immediately decides it, once.
+    """
+    proposal = create_action_proposal(
+        action=action,
+        target_artifact_type=target_artifact_type,
+        target_artifact_id=target_artifact_id,
+        reason=reason,
+        evidence=evidence,
+    )
+    return _action_proposal_to_dict(proposal)
+
+
+@mcp.tool(name="ledger_list_action_proposals")
+def ledger_list_action_proposals() -> list[dict[str, Any]]:
+    """List every ActionProposal folded from `ledger_data/action_proposals.log.md` (AD-12, Story 13).
+
+    Read-only: never appends to the log. Computed by purely replaying that
+    one flat, project-wide log (AD-3) -- never cached -- one record per
+    `proposal_id`, in first-proposed order. Returns `[]` -- never raises --
+    when the log doesn't exist yet (no proposal has ever been created).
+    """
+    return [_action_proposal_to_dict(proposal) for proposal in list_action_proposals()]
 
 
 def main() -> None:

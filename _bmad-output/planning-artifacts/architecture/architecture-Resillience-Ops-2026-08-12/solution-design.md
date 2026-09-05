@@ -5,7 +5,7 @@ companion-to: 'ARCHITECTURE-SPINE.md'
 scope: 'Rez Ops v1 — AI agent framework for Disaster Recovery program management'
 status: final
 created: '2026-08-12'
-updated: '2026-08-13'
+updated: '2026-09-05'
 sources:
   - 'ARCHITECTURE-SPINE.md'
   - '.memlog.md'
@@ -21,6 +21,8 @@ sources:
 Rez Ops is an AI agent that manages a Disaster Recovery (DR) program without becoming yet another place for the program's data to live and go stale. DR programs at large, always-on organizations are accountable for a sprawl of artifacts — Business Impact Analyses (BIAs), application/service tiering, runbooks, RACI ownership records, test schedules — scattered across a CMDB, a ticketing system, a wiki, a spreadsheet, and someone's memory. None of those systems know when their own data has gone stale. A BIA doesn't know it's 18 months overdue for review; a RACI doc doesn't know its "Accountable" owner left the company two reorgs ago. Because reconstructing the program's true state is manual and slow, it only actually gets done under pressure — right before an audit, or right after an incident already proved the gap was real.
 
 Rez Ops closes that gap not by building a new system of record (every AI-flavored competitor in this space does that, and it's a trap — whoever owns the data owns the lock-in), but by connecting, read-only, to the systems the program already has, and maintaining one thing none of them maintain today: a **Freshness Ledger** — a structured, continuously-expiring model of what's verified, what's stale, and who's accountable right now. It's built on coding-agent runtimes (Claude Code first, but portable to any MCP-compatible client) connected to the program's tools via the Model Context Protocol (MCP). The chat-queryable live state is the primary interface; a daily briefing is one view on top of it, not the product. Three non-negotiables constrain everything in v1: read-only-first (no write-back to systems of record), graceful degradation (if Rez Ops is wrong or down, the program is never worse off than its manual baseline), and never hiding its own uncertainty (an explicit confidence map, not silent guessing).
+
+A later amendment (AD-11, AD-12 — see its own section below) extends this without touching any of the above: Voice may now *propose* a claim or an action, structured and evidence-backed, for a human or a future policy-gated executor to act on. Nothing observes, computes, or writes differently than described here; a new, explicitly-named door was added, not a wall removed.
 
 ## The paradigm, explained
 
@@ -73,17 +75,20 @@ rez-ops/
     ticketing/         # Sensor MCP server
     git_repo/          # Sensor MCP server
     cmdb/              # Sensor MCP server
-  ledger_core/         # Ledger MCP server: computation, confidence, ownership arbitration, drafts
+  ledger_core/         # Ledger MCP server: computation, confidence, ownership arbitration, drafts, evidence, policy
   ledger_data/         # AD-3: append-only logs + materialized state, git-committed
     bia/
     tiering/
     runbooks/
     raci/
     test_records/
-    drafts/            # AD-6: pending outbound content, written only via ledger-core's write tool
+    drafts/                  # AD-6: pending outbound content, written only via ledger-core's write tool
+    evidence/                 # AD-11: EvidenceBundle records, one file per bundle, created-only
+    action_proposals.log.md   # AD-12: proposed/decided events; current state is a projection, same pattern as AD-3
     _ops.log.md        # AD-7: scheduled-run failure log
   .mcp.json            # project-scoped MCP server registration
   rezops.config.yaml   # enabled connectors, tier SLA policy (inputs only — AD-9)
+  rezops.policy.yaml   # AD-12: per-action risk/impact rules — inputs only, ledger-core evaluates
 ```
 
 ## Walking through each design decision
@@ -126,6 +131,18 @@ These are the two ADs about what happens when reality doesn't cooperate — no i
 
 **AD-8**, graceful degradation, is the starkest example in this whole document of the review process catching something the first draft simply missed outright: the brief states graceful degradation as one of exactly three non-negotiables, and it was absent from the spine entirely until the reconcile-against-brief check flagged it. The rule fills that gap directly: every runtime-facing operation must fail open — a connector or Ledger-Core outage surfaces as an explicit `unknown`/unverified state, never a crash that blocks the human — and no component or AD may require Rez Ops to be running for the underlying DR program to function. This is the architectural expression of the brief's "smoke detector, not fire inspector" framing: a smoke detector with a dead battery doesn't cause the fire, and Rez Ops going down for any reason must never be the thing that makes the DR program worse off than it would have been with no Rez Ops at all.
 
+### Extending the paradigm: Evidence and the Policy Engine (AD-11, AD-12)
+
+This cluster is a later addition, not part of the original v1 build — it came out of Olu weighing outside research (a proposal to combine Rez Ops' safety posture with a richer, more agentic reasoning/action model) against the ten ADs above, and deciding what to actually adopt. The research's own strongest point was self-aware about the risk of overreach: don't turn Rez Ops into a bigger, riskier system just because a bigger system was described; keep everything that already works, and add only the smallest slice that gets real value without touching the read-only posture. That's what AD-11 and AD-12 are.
+
+The reframe worth stating explicitly, because it's the hinge the rest of this section turns on: **read-only-first isn't being reversed, it's being named as a default with one explicit door.** AD-1 through AD-10 didn't change. What changed is that Voice now has a second thing it's allowed to do besides observe and present: it can *propose* — a claim (backed by evidence) or an action (evaluated by policy) — without ever executing either. There is still no Executor anywhere in this architecture. A `policy_decision` of `automatic` today means nothing more than "would need no human sign-off, if an Executor existed" — it triggers exactly nothing, because nothing consumes it yet.
+
+**AD-11 (Evidence boundary)** answers a question the original ten ADs never had to ask: what happens when Voice makes a *claim* — "this runbook looks stale" — rather than reporting a fact? Before AD-11, that claim was just prose, with no structured link back to whatever justified it. `EvidenceBundle` fixes that: a claim, a confidence score, citations back to real `RawFact`/`LedgerRecord` data, and the reasoning connecting them. The one decision worth dwelling on is who computes `EvidenceBundle.confidence` — where the reviewer gate earned its keep a second time. The first draft had Voice assemble the whole bundle, mirroring AD-6's drafts mechanism (Voice calls a tool, ledger-core just persists it). A rubric walker and an adversarial reviewer, working independently, found the same hole: if Voice supplies its own confidence score, and AD-12's policy decision reads that score, Voice gets an indirect lever over its own action's approval — the exact failure AD-12 exists to prevent, reopened one layer up. The fix keeps AD-6's shape but narrows it: Voice supplies the claim, reasoning, and which facts to cite; ledger-core computes the confidence score itself, using one documented method (formula deferred, same pattern as AD-5). A caller-supplied confidence value is now a schema violation, exactly like a connector-supplied `tier_sla` under AD-9.
+
+**AD-12 (ActionProposal and the Policy Engine)** mattered most and needed the most precision, because its entire job is guaranteeing one property: the LLM never decides for itself whether it's allowed to act. The adversarial reviewer found three gaps. The "fixed vocabulary of action identifiers" named no actual source — so two features could each invent an incompatible "fixed" set. Fixed: the vocabulary is exactly `rezops.policy.yaml`'s top-level keys, one source of truth Voice reads to discover what it may even propose. `policy_decision` resolved against "risk × criticality × confidence" without saying how multiple cited evidence bundles combine into one number — average, minimum, and worst-of-N all disagree. Fixed: **minimum** confidence across every cited bundle, on purpose — a proposal is only as trustworthy as its weakest evidence. And an `ActionProposal` has a lifecycle `Draft` never needed — proposed, then decided — with no specified way to record a decision that didn't risk either mutating the proposal in place (violating AD-3) or an ad hoc new mechanism. Fixed: it gets AD-3's actual discipline — a `proposed` event followed by a `decided` event, both appended to one log, current state a projection, the same pattern AD-3 already uses for artifact-type facts.
+
+One more finding sharpened the Never clause itself: "no executor exists *in this phase*" is a statement about today, not a structural guarantee — nothing in that wording stopped an `automatic` decision from quietly triggering an internal write (an AD-6 `Draft`) with no external executor built. The clause now reads structurally: nothing acts on `policy_decision` regardless of its value, full stop. "We haven't built the executor yet" and "nothing can act on this signal" are different guarantees, and only the second is load-bearing.
+
 ## Stack rationale
 
 Every stack choice was made or corrected against live web research rather than assumed from training data, because a fast-moving CLI and a fast-moving protocol are exactly the kind of thing that goes stale between a model's cutoff and the day the code actually gets written.
@@ -164,6 +181,12 @@ None of the following are gaps in the design — they're places where the right 
 
 **Multi-user/multi-tenant support.** The brief's stated primary user is a single program owner; v1 is scoped to exactly that person. Multi-tenancy is a different set of ownership, isolation, and access-control problems that don't need solving until there's a second user to solve them for.
 
+**The Executor.** This is the big one, and it's deferred on purpose, not by oversight. AD-12 builds everything up to and including a computed `policy_decision` — and then stops. Nothing consumes that decision to actually perform an action against an external system. Building that consumer is exactly the kind of decision this whole document argues should never happen by default extrapolation from "well, AD-12 already exists" — it's a deliberate, separate architectural decision, requiring its own AD, made once there's a real reason to cross that line rather than because the plumbing up to it is now in place.
+
+**`rezops.policy.yaml`'s exact per-action fields and `policy_decision`'s exact thresholds.** AD-12 fixes who evaluates policy and where the action vocabulary lives — not the exact numeric thresholds or which actions exist yet. Same deferral pattern as AD-5's confidence formula: implementation detail owned by the code once it's written.
+
+**`LedgerRecord.tier_sla` actually being computed.** AD-12's criticality signal leans on it, and it was already deferred under AD-9 before this amendment — a target with no `tier_sla` yet resolves to the most conservative tier rather than a guess, so AD-12 doesn't need this resolved to be safe, just to be more precise later.
+
 ## Reading this alongside the brief
 
 Every brief commitment lands on a specific, named AD:
@@ -175,3 +198,5 @@ Every brief commitment lands on a specific, named AD:
 - **Trust-layer requirements** (every inferred claim shows its sources; a human-approval gate on any write; a durable, attributable, timestamped record as a byproduct of normal operation) → AD-9's mandatory `source` field, AD-6's draft-only write boundary, and AD-3's append-only event log, respectively.
 
 None of these mappings were free — each is a direct answer to a specific sentence in the brief's Scope section. That traceability, every non-negotiable and every trust-layer requirement lands on a specific, named AD rather than getting handled by vague good intentions, is itself the strongest evidence that this architecture is built to do what the brief asked for, not just adjacent to it.
+
+AD-11 and AD-12 are the one exception worth flagging honestly: they don't map to anything in the original brief, because they postdate it — they're Olu's own later decision to extend the v1 scope, not a brief requirement being fulfilled. What they don't do is contradict the brief. Read-only-first, graceful degradation, and never-hide-uncertainty all still hold exactly as stated above; AD-11/AD-12 add a named, gated *door* for proposing a claim or an action, not a write path that bypasses any of the three.

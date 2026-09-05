@@ -50,6 +50,14 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
   - **intent:** Generate a briefing on a schedule without a human present.
   - **success:** An OS-scheduled invocation completes end-to-end and updates ledger state or logs a failure explicitly; no scheduled run fails silently.
 
+- **CAP-9 — Evidence-backed claims**
+  - **intent:** Let Voice make a reasoning-layer claim about ledger state as a structured `EvidenceBundle` (claim, confidence, cited facts, reasoning) rather than unattributed prose, with confidence computed exclusively by ledger-core from the cited evidence — never supplied by the caller.
+  - **success:** Every `EvidenceBundle`'s confidence is ledger-core-computed, not accepted as input; a caller-supplied confidence value is rejected as a schema violation; every citation resolves back to a real ingested fact or ledger record, never an inline duplicate.
+
+- **CAP-10 — Policy-gated action proposals**
+  - **intent:** Let Voice propose a system-state-changing action — naming it from a config-declared vocabulary, citing at least one `EvidenceBundle` — and have ledger-core alone compute whether it's automatic, requires human approval, or is denied, without any component executing it.
+  - **success:** Every `ActionProposal`'s `policy_decision` is computed by ledger-core from config-declared action risk, target criticality, and the minimum confidence across cited evidence — never asserted by the caller; naming an undeclared action or citing no evidence is rejected before anything is recorded; no code path in v1 consumes an approved/automatic decision to perform the action against any external system.
+
 ## Constraints
 
 - No connector may write to any external system of record in v1 (read-only-first).
@@ -58,12 +66,14 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
 - v1 runs local-first: no hosted database, container orchestration, or persistent server process; git is the sole persistence layer.
 - Ledger state is mutated only through an append-only log; no in-place edits — single writer, auditable history.
 - v1 favors fewer, high-trust, provenance-ranked sources over broad source coverage.
+- Voice may propose a claim or an action; it never computes the derived value that evaluates it — `EvidenceBundle.confidence` and `ActionProposal.policy_decision` are ledger-core-exclusive, the same discipline as CAP-3's confidence computation extended to the proposal layer.
 
-*Full mechanism for each of these lives in `ARCHITECTURE-SPINE.md` (AD-1 through AD-10).*
+*Full mechanism for each of these lives in `ARCHITECTURE-SPINE.md` (AD-1 through AD-12).*
 
 ## Non-goals
 
-- Write-back or auto-actioning against any system of record.
+- Auto-actioning against any system of record: a computed `policy_decision` (CAP-10) is a recorded judgment, not a permission that anything acts on.
+- An Executor that consumes an `ActionProposal`'s `policy_decision` to actually perform the action against any external system — explicitly deferred; a separate, later, deliberate decision, not a default extrapolation from CAP-10 existing.
 - A retroactive "would-have-caught-it" scoreboard against past incidents (Blast Radius Rewind).
 - Proactive or surprise micro-drills, or agent-triggered synthetic failovers.
 - Auto-sending owner-reconfirmation messages or any outbound content without human approval.
@@ -74,7 +84,7 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
 
 ## Success signal
 
-Zero "we didn't know that was stale" surprises at the next audit or review; "who owns X" answered in seconds via a live query instead of days of chasing; and a generated briefing consistently surfaces genuinely new information rather than repeating already-handled items.
+Zero "we didn't know that was stale" surprises at the next audit or review; "who owns X" answered in seconds via a live query instead of days of chasing; a generated briefing consistently surfaces genuinely new information rather than repeating already-handled items; and every proposed action shows its evidence trail and policy decision before any human is asked to approve it — never a bare recommendation with no attributable reasoning.
 
 ## Assumptions
 

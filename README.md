@@ -44,7 +44,7 @@ This is enough to develop and test Rez Ops. To actually *use* it against real sy
 
 ## User Guide
 
-Rez Ops has no CLI and no UI of its own — every one of the 11 tools below is an MCP tool call, and you drive it by talking to an MCP-compatible client (Claude Code is the reference runtime) in natural language. This section walks through going from a fresh checkout to a running daily briefing.
+Rez Ops has no CLI and no UI of its own — every one of the 15 tools below is an MCP tool call, and you drive it by talking to an MCP-compatible client (Claude Code is the reference runtime) in natural language. This section walks through going from a fresh checkout to a running daily briefing.
 
 ### 1. Set connector credentials
 
@@ -76,7 +76,7 @@ cd /path/to/rez-ops
 claude
 ```
 
-Claude Code detects `.mcp.json` automatically and (on first use) will prompt you to approve the project-scoped servers. Once approved, all 11 tools below are available to it. If you're using a different MCP client, point it at the same `.mcp.json`.
+Claude Code detects `.mcp.json` automatically and (on first use) will prompt you to approve the project-scoped servers. Once approved, all 15 tools below are available to it. If you're using a different MCP client, point it at the same `.mcp.json`.
 
 ### 3. Core concepts
 
@@ -87,7 +87,7 @@ Claude Code detects `.mcp.json` automatically and (on first use) will prompt you
 
 ### 4. The tools
 
-**Ledger-core** (7 tools — the only thing that ever writes to the ledger):
+**Ledger-core** (11 tools — the only thing that ever writes to the ledger):
 
 | Tool | Purpose |
 |---|---|
@@ -97,6 +97,10 @@ Claude Code detects `.mcp.json` automatically and (on first use) will prompt you
 | `ledger_get_coverage()` | Per-artifact-type tally of confidence counts — a bird's-eye view. |
 | `ledger_create_draft(artifact_type, artifact_id, draft_type, subject, body, recipient=None)` | Draft outbound content (e.g. a nudge to an owner). Never sends anything. |
 | `ledger_list_drafts(artifact_type=None, artifact_id=None, draft_type=None)` | List drafts waiting for a human to actually send. |
+| `ledger_create_evidence(claim, reasoning, evidence)` | Create one EvidenceBundle citing structured evidence; `confidence` is always ledger-core-computed, never a caller-supplied argument. |
+| `ledger_list_evidence()` | List every EvidenceBundle ever created. |
+| `ledger_create_action_proposal(action, target_artifact_type, target_artifact_id, reason, evidence)` | Propose a system-state-changing `action` (from `rezops.policy.yaml`'s fixed vocabulary) citing evidence bundle ids; records ledger-core's computed `impact`/`policy_decision` (`automatic`/`requires_approval`/`denied`). Never itself acts on that decision. |
+| `ledger_list_action_proposals()` | List every ActionProposal ever created, with its policy decision. |
 | `ledger_get_briefing()` | The daily briefing: orphan-risk artifacts, unknown-confidence artifacts, pending drafts, and any data-quality issues, in one call. |
 
 **Sensors** (4 tools — one per connector, each returns a RawFact-shaped dict, never writes to the ledger itself):
