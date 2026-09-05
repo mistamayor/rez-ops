@@ -16,13 +16,12 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ## Status
 
-All 11 planned stories shipped, 406 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
+All 11 planned stories shipped, 399 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
 
 **Built:**
 - Shared `RawFact`/`LedgerRecord` schema and append-only ledger core (confidence, coverage, live queries)
 - Four Sensors: git (local, no credentials needed), ServiceNow ticketing, Google Calendar, ServiceNow CMDB
 - Ownership inference/arbitration and orphan-risk detection, draft-not-send outbound content, a periodic briefing aggregating what needs a decision today, and `.mcp.json` + `ops/run_scheduled_briefing.py` for OS-scheduled headless operation with explicit failure logging
-- A local, read-only HTML dashboard (`ops/generate_dashboard.py`) for looking at ledger state outside of a chat session
 
 **Not yet done:** registering an actual cron/launchd job on any machine — `ops/README.md` documents how, but nothing installs one automatically. Known gaps and accepted risks are tracked in [`_bmad-output/implementation-artifacts/deferred-work.md`](_bmad-output/implementation-artifacts/deferred-work.md).
 
@@ -36,7 +35,7 @@ All 11 planned stories shipped, 406 tests passing. See [`_bmad-output/specs/spec
 
 ```bash
 uv sync
-uv run pytest -v      # 406 tests, all mocked/local — no live credentials needed to run the suite
+uv run pytest -v      # 399 tests, all mocked/local — no live credentials needed to run the suite
 ```
 
 This is enough to develop and test Rez Ops. To actually *use* it against real systems, continue to the User Guide.
@@ -127,18 +126,7 @@ calls `ledger_get_record` and shows you the computed confidence, last-verified t
 
 calls `ledger_get_briefing()` — everything that needs a decision today, in one call: which artifacts are orphan-risk, which are `unknown` confidence, which drafts are still waiting to be sent, and any data-quality issues (a corrupted log surfaces here rather than silently vanishing — AD-8).
 
-### 7. Visualizing the current state
-
-There's no dashboard running while things happen — Rez Ops has no server process (AD-7) and no chat is required to *have* a state, only to change it. To actually look at a snapshot instead of reading raw files or asking in chat:
-
-```bash
-uv run python ops/generate_dashboard.py
-open dashboard.html      # macOS; use `xdg-open`/`start` elsewhere
-```
-
-Renders a single self-contained local HTML file — coverage by artifact type, orphan-risk artifacts, unknown-confidence artifacts, pending drafts, and any data-quality issues — straight from the same `get_coverage_map`/`get_briefing` functions the MCP tools use, so it never drifts from what a live query would show. Nothing is uploaded anywhere; it's a static file you open yourself and regenerate whenever you want a fresh snapshot (`--ledger-dir`/`--output` to point it elsewhere). `dashboard.html` is gitignored — it's a generated view, not part of the ledger.
-
-### 8. Drafting outbound content
+### 7. Drafting outbound content
 
 Rez Ops never sends anything on its own (AD-6) — it only prepares a draft for a human to review and send manually:
 
@@ -146,7 +134,7 @@ Rez Ops never sends anything on its own (AD-6) — it only prepares a draft for 
 
 calls `ledger_create_draft`, which defaults `recipient` to that artifact's computed escalation owner (or leaves it unset if the artifact is orphan-risk — never a guess). The draft is written to `ledger_data/drafts/{draft_id}.md`, a plain git-tracked markdown file you can also open and read directly. List everything pending with `ledger_list_drafts()`.
 
-### 9. Running it unattended
+### 8. Running it unattended
 
 `ops/run_scheduled_briefing.py` invokes `claude -p --mcp-config .mcp.json --output-format json` non-interactively and logs any failure (never fails silently) to `ledger_data/_ops.log.md`. Full setup, including sample crontab/launchd snippets, is in [`ops/README.md`](ops/README.md) — registering an actual scheduled job is a manual step nothing in this repo does for you.
 
@@ -162,7 +150,7 @@ connectors/
   ticketing/              # Sensor: ServiceNow Table API (incidents/tasks)
   calendar_google/         # Sensor: Google Calendar API v3
   cmdb/                     # Sensor: ServiceNow Table API (configuration items)
-ops/                     # Scheduled headless invocation + failure logging (AD-7); local read-only dashboard generator
+ops/                     # Scheduled headless invocation wrapper + failure logging (AD-7)
 tests/                   # One test file per module, httpx.MockTransport for every HTTP connector
 ledger_data/             # Runtime state: append-only per-artifact-type logs (git-committed, human-readable)
 .mcp.json                # Project-scoped registration of ledger-core + all four connector servers
