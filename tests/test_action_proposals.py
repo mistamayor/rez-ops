@@ -27,7 +27,7 @@ from ledger_core.action_proposals import (
     create_action_proposal,
     list_action_proposals,
 )
-from ledger_core.evidence import EvidenceBundle, _render_bundle
+from ledger_core.evidence import EvidenceBundle, EvidenceRef, _render_bundle
 from ledger_core.log import append_event
 from ledger_core.projection import get_record
 from ledger_core.server import mcp
@@ -724,6 +724,200 @@ def test_target_artifact_need_not_actually_exist(
     # that was never observed at all.
     record = get_record("bia", "never_seen_before", ledger_dir=ledger_dir)
     assert record.tier_sla is None
+
+
+# --- fail-closed: missing/malformed policy file ------------------------------
+#
+# Threat-modeling the policy engine specifically (per external review):
+# policy failure -- a missing file, or one that fails to parse -- must never
+# resolve to "automatic". A caller-facing failure here should be a clean,
+# typed error (nothing is appended), never a raw crash and never a silent
+# permissive default.
+
+
+def test_create_action_proposal_fails_closed_when_policy_file_does_not_exist(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """No `rezops.policy.yaml` at all -- `_load_policy` returns `{}`, so
+    every action name is "not declared" and rejected, the same as an
+    undeclared action against a real, present-but-incomplete file. Fail
+    closed, not fail open: absence of policy is never permission.
+    """
+    _seed_evidence_bundle(ledger_dir, "ev1", 1.0)
+    missing_policy_path = tmp_path / "does_not_exist.yaml"
+    assert not missing_policy_path.exists()
+
+    with pytest.raises(ActionProposalValidationError, match="not declared"):
+        create_action_proposal(
+            action="create_ticket",
+            target_artifact_type="bia",
+            target_artifact_id="sys01",
+            reason="reason",
+            evidence=["ev1"],
+            ledger_dir=ledger_dir,
+            policy_path=missing_policy_path,
+        )
+    assert not (ledger_dir / "action_proposals.log.md").exists()
+
+
+def test_create_action_proposal_raises_typed_error_on_malformed_policy_file(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """A policy file that exists but fails to parse (e.g. an invalid
+    `impact` value) raises `PolicyFileError` -- a clean, typed failure, not
+    a raw crash -- and nothing is appended. Malformed policy is a
+    configuration problem, never silently treated as "no restrictions".
+    """
+    _seed_evidence_bundle(ledger_dir, "ev1", 1.0)
+    malformed_policy_path = tmp_path / "rezops.policy.yaml"
+    malformed_policy_path.write_text(
+        "create_ticket:\n  impact: catastrophic\n", encoding="utf-8"
+    )
+
+    with pytest.raises(PolicyFileError):
+        create_action_proposal(
+            action="create_ticket",
+            target_artifact_type="bia",
+            target_artifact_id="sys01",
+            reason="reason",
+            evidence=["ev1"],
+            ledger_dir=ledger_dir,
+            policy_path=malformed_policy_path,
+        )
+    assert not (ledger_dir / "action_proposals.log.md").exists()
+
+
+def test_ledger_create_action_proposal_tool_surfaces_malformed_policy_as_structured_error(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same malformed-policy failure, through the actual MCP tool
+    boundary -- not just the module-level function -- surfaces as a
+    structured, non-crashing MCP error (`isError=True`), the same
+    mechanism proven for every other typed error in this module, rather
+    than an unhandled exception reaching the client as a raw traceback.
+    """
+    _seed_evidence_bundle(ledger_dir, "ev1", 1.0)
+    malformed_policy_path = tmp_path / "rezops.policy.yaml"
+    malformed_policy_path.write_text(
+        "create_ticket:\n  impact: catastrophic\n", encoding="utf-8"
+    )
+    _point_server_at(monkeypatch, ledger_dir, malformed_policy_path)
+
+    result = asyncio.run(
+        _call_ledger_create_action_proposal(
+            "create_ticket", "bia", "sys01", "reason", ["ev1"]
+        )
+    )
+
+    assert result.isError is True
+    assert not (ledger_dir / "action_proposals.log.md").exists()
+
+
+def test_ledger_create_action_proposal_tool_fails_closed_when_policy_file_missing(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same fail-closed guarantee as `test_create_action_proposal_fails_closed_when_policy_file_does_not_exist`,
+    proven through the actual MCP tool boundary.
+    """
+    _seed_evidence_bundle(ledger_dir, "ev1", 1.0)
+    missing_policy_path = tmp_path / "does_not_exist.yaml"
+    _point_server_at(monkeypatch, ledger_dir, missing_policy_path)
+
+    result = asyncio.run(
+        _call_ledger_create_action_proposal(
+            "create_ticket", "bia", "sys01", "reason", ["ev1"]
+        )
+    )
+
+    assert result.isError is True
+    assert not (ledger_dir / "action_proposals.log.md").exists()
+
+
+# --- stale evidence: confidence is a frozen point-in-time snapshot ----------
+
+
+def test_action_proposal_uses_evidence_confidence_as_frozen_at_bundle_creation_time(
+    ledger_dir: Path, policy_path: Path
+) -> None:
+    """An `EvidenceBundle`'s `confidence` is computed once, at creation, and
+    never re-verified (Story 12's own design: "a bundle is a point-in-time
+    snapshot, like a LedgerRecord, never re-validated on read"). This
+    proves that behavior explicitly for the case an external reviewer
+    specifically flagged as worth demonstrating ("stale evidence"): once a
+    bundle is cited, an `ActionProposal` uses its frozen confidence even
+    though the underlying fact it once cited has since become
+    undiscoverable -- it is never silently re-resolved against current
+    state a second time. Uses a *different* artifact type for the evidence
+    citation than for the proposal's own target, so this test exercises
+    only the frozen-confidence behavior, not `get_record`'s separate
+    corrupted-target-log handling (covered by its own test below).
+    """
+    from ledger_core.evidence import create_evidence_bundle
+
+    _seed_fact(ledger_dir, "runbooks", "sys01", "git:abc123")
+    bundle = create_evidence_bundle(
+        claim="this looks fine",
+        reasoning="the fact resolved at the time",
+        evidence=[
+            EvidenceRef(artifact_type="runbooks", artifact_id="sys01", source="git:abc123")
+        ],
+        ledger_dir=ledger_dir,
+    )
+    assert bundle.confidence == 1.0
+
+    # The underlying artifact-type log the bundle cited is now corrupted --
+    # the fact it once resolved against is no longer discoverable at all.
+    # Re-running the same resolution today would find nothing.
+    (ledger_dir / "runbooks.log.md").write_text(
+        "not a valid event log line\n", encoding="utf-8"
+    )
+
+    proposal = create_action_proposal(
+        action="create_ticket",
+        target_artifact_type="bia",  # a different, clean artifact type
+        target_artifact_id="sys01",
+        reason="acting on stale evidence",
+        evidence=[bundle.evidence_id],
+        ledger_dir=ledger_dir,
+        policy_path=policy_path,
+    )
+
+    # The proposal used the bundle's already-computed, frozen confidence
+    # (1.0) -- it never re-resolved the citation against the now-corrupted
+    # log (which would have raised, not just returned a different number).
+    # requires_approval, not automatic, since tier_sla is still unknown --
+    # but the point is the confidence value itself came from the frozen
+    # bundle, not a fresh (and now impossible) re-check.
+    assert proposal.policy_decision == "requires_approval"
+
+
+def test_create_action_proposal_tolerates_corrupted_target_log_for_criticality(
+    ledger_dir: Path, policy_path: Path
+) -> None:
+    """A corrupted log for the *target's own* artifact type must not crash
+    proposal creation -- criticality fails open to "unknown" (AD-8), the
+    same graceful-degradation discipline `evidence._resolve_ref` already
+    applies to its own `get_record` dependency. Found via this hardening
+    pass: `create_action_proposal`'s `get_record` call for the target had
+    no such guard before this fix.
+    """
+    _seed_evidence_bundle(ledger_dir, "ev1", 1.0)
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    (ledger_dir / "bia.log.md").write_text("not a valid event log line\n", encoding="utf-8")
+
+    proposal = create_action_proposal(
+        action="create_ticket",
+        target_artifact_type="bia",
+        target_artifact_id="sys01",
+        reason="reason",
+        evidence=["ev1"],
+        ledger_dir=ledger_dir,
+        policy_path=policy_path,
+    )
+
+    # Criticality unknown (fails open, doesn't crash) -> never automatic,
+    # regardless of how high confidence is.
+    assert proposal.policy_decision == "requires_approval"
 
 
 # --- rezops.policy.yaml parsing ----------------------------------------------

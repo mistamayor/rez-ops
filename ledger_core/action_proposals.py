@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ledger_core.evidence import list_evidence
+from ledger_core.log import LogFormatError
 from ledger_core.projection import get_record
 
 #: Default root for git-committed ledger data. Kept equal in value to
@@ -530,8 +531,16 @@ def create_action_proposal(
     # citations of the same evidence_id don't change the minimum either way.
     min_confidence = min(bundles_by_id[evidence_id].confidence for evidence_id in evidence_ids)
 
-    record = get_record(target_artifact_type, target_artifact_id, ledger_dir=ledger_dir)
-    tier_sla_known = record.tier_sla is not None
+    # A corrupted target artifact-type log fails open here, the same
+    # graceful-degradation discipline `evidence._resolve_ref` already
+    # applies to its own `get_record` call (AD-8): criticality resolves to
+    # its most conservative reading (unknown) rather than crashing proposal
+    # creation over a data-quality problem in an unrelated artifact type.
+    try:
+        record = get_record(target_artifact_type, target_artifact_id, ledger_dir=ledger_dir)
+        tier_sla_known = record.tier_sla is not None
+    except LogFormatError:
+        tier_sla_known = False
 
     policy_decision = _compute_policy_decision(
         impact=impact, tier_sla_known=tier_sla_known, min_confidence=min_confidence
