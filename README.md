@@ -18,11 +18,11 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ## Status
 
-All 14 planned stories shipped, 569 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
+All 15 planned stories shipped, 657 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
 
 **Built:**
 - Shared `RawFact`/`LedgerRecord` schema and append-only ledger core (confidence, coverage, live queries)
-- Five Sensors: git (local, no credentials needed), ServiceNow ticketing, Google Calendar, ServiceNow CMDB, Google Drive
+- Six Sensors: git (local, no credentials needed), ServiceNow ticketing, Google Calendar, ServiceNow CMDB, Google Drive, SharePoint (Microsoft Graph)
 - Ownership inference/arbitration and orphan-risk detection, draft-not-send outbound content, a periodic briefing aggregating what needs a decision today, and `.mcp.json` + `ops/run_scheduled_briefing.py` for OS-scheduled headless operation with explicit failure logging
 - Evidence-backed claims (`EvidenceBundle`) and policy-gated action proposals (`ActionProposal`) — a later extension beyond the original 11 stories; see User Guide steps 8–9
 
@@ -38,7 +38,7 @@ All 14 planned stories shipped, 569 tests passing. See [`_bmad-output/specs/spec
 
 ```bash
 uv sync
-uv run pytest -v      # 569 tests, all mocked/local — no live credentials needed to run the suite
+uv run pytest -v      # 657 tests, all mocked/local — no live credentials needed to run the suite
 ```
 
 This is enough to develop and test Rez Ops. To actually *use* it against real systems, continue to the User Guide.
@@ -47,11 +47,11 @@ This is enough to develop and test Rez Ops. To actually *use* it against real sy
 
 ## User Guide
 
-Rez Ops has no CLI and no UI of its own — every one of the 16 tools below is an MCP tool call, and you drive it by talking to an MCP-compatible client (Claude Code is the reference runtime) in natural language. This section walks through going from a fresh checkout to a running daily briefing.
+Rez Ops has no CLI and no UI of its own — every one of the 17 tools below is an MCP tool call, and you drive it by talking to an MCP-compatible client (Claude Code is the reference runtime) in natural language. This section walks through going from a fresh checkout to a running daily briefing.
 
 ### 1. Set connector credentials
 
-Each connector reads its own credentials from environment variables — never a config file, never shared between connectors even when they target the same vendor (AD-7). Set whichever connectors you plan to use; you don't need all five.
+Each connector reads its own credentials from environment variables — never a config file, never shared between connectors even when they target the same vendor (AD-7). Set whichever connectors you plan to use; you don't need all six.
 
 | Connector | Env vars | Notes |
 |---|---|---|
@@ -60,6 +60,7 @@ Each connector reads its own credentials from environment variables — never a 
 | calendar (Google) | `REZOPS_CALENDAR_TOKEN` | An OAuth access token with Calendar read scope |
 | cmdb (ServiceNow) | `REZOPS_CMDB_INSTANCE_URL`, `REZOPS_CMDB_TOKEN` | Separate instance/token from ticketing even if it's the same ServiceNow tenant — no credential sharing between connectors, by design |
 | google drive | `REZOPS_DRIVE_TOKEN` | An OAuth access token with Drive read scope — a distinct credential from `REZOPS_CALENDAR_TOKEN` even though both target Google, by design |
+| sharepoint (Microsoft Graph) | `REZOPS_SHAREPOINT_TOKEN` | A Microsoft Graph bearer token with read access to the target drive — independent from every other connector's credential, including the two Google tokens, by design |
 
 ```bash
 export REZOPS_TICKETING_INSTANCE_URL="https://yourinstance.service-now.com"
@@ -68,20 +69,21 @@ export REZOPS_CALENDAR_TOKEN="..."
 export REZOPS_CMDB_INSTANCE_URL="https://yourinstance.service-now.com"
 export REZOPS_CMDB_TOKEN="..."
 export REZOPS_DRIVE_TOKEN="..."
+export REZOPS_SHAREPOINT_TOKEN="..."
 ```
 
 None of these are required to run the test suite — every HTTP-based connector is tested against `httpx.MockTransport`. They're only needed when you want a connector to talk to a real system.
 
 ### 2. Connect Claude Code to Rez Ops
 
-`.mcp.json` at the repo root already registers all six servers (ledger-core + five connectors) as project-scoped MCP servers, each launched as `uv run python -m {module}.server`. Nothing further to configure — just run Claude Code from inside this repo:
+`.mcp.json` at the repo root already registers all seven servers (ledger-core + six connectors) as project-scoped MCP servers, each launched as `uv run python -m {module}.server`. Nothing further to configure — just run Claude Code from inside this repo:
 
 ```bash
 cd /path/to/rez-ops
 claude
 ```
 
-Claude Code detects `.mcp.json` automatically and (on first use) will prompt you to approve the project-scoped servers. Once approved, all 16 tools below are available to it. If you're using a different MCP client, point it at the same `.mcp.json`.
+Claude Code detects `.mcp.json` automatically and (on first use) will prompt you to approve the project-scoped servers. Once approved, all 17 tools below are available to it. If you're using a different MCP client, point it at the same `.mcp.json`.
 
 ### 3. Core concepts
 
@@ -110,7 +112,7 @@ Claude Code detects `.mcp.json` automatically and (on first use) will prompt you
 | `ledger_list_action_proposals()` | List every ActionProposal ever created, with its policy decision. |
 | `ledger_get_briefing()` | The daily briefing: orphan-risk artifacts, unknown-confidence artifacts, pending drafts, and any data-quality issues, in one call. |
 
-**Sensors** (5 tools — one per connector, each returns a RawFact-shaped dict, never writes to the ledger itself):
+**Sensors** (6 tools — one per connector, each returns a RawFact-shaped dict, never writes to the ledger itself):
 
 | Tool | Fetches |
 |---|---|
@@ -119,6 +121,7 @@ Claude Code detects `.mcp.json` automatically and (on first use) will prompt you
 | `calendar_get_event_status(calendar_id, event_id, artifact_type, artifact_id)` | One Google Calendar event's current state (e.g. a scheduled DR test). |
 | `cmdb_get_ci_status(table, sys_id, artifact_type, artifact_id)` | One ServiceNow CMDB configuration item's current state. |
 | `google_drive_get_document_status(file_id, artifact_type, artifact_id)` | One Google Drive file's last-modified metadata (never document content). |
+| `sharepoint_get_document_status(drive_id, item_id, artifact_type, artifact_id)` | One Microsoft Graph drive item's last-modified metadata (never document content). |
 
 ### 5. Walkthrough: tracking your first artifact
 
@@ -179,12 +182,13 @@ connectors/
   calendar_google/         # Sensor: Google Calendar API v3
   cmdb/                     # Sensor: ServiceNow Table API (configuration items)
   google_drive/             # Sensor: Google Drive API v3 (file last-modified metadata)
+  sharepoint/               # Sensor: Microsoft Graph (drive item last-modified metadata)
 ops/                     # Scheduled headless invocation wrapper + failure logging (AD-7)
 tests/                   # One test file per module, httpx.MockTransport for every HTTP connector
 ledger_data/             # Runtime state: append-only logs (git-committed, human-readable)
   evidence/               # EvidenceBundle records, one file per bundle
   action_proposals.log.md # ActionProposal proposed/decided events (append-only log, not per-artifact-type)
-.mcp.json                # Project-scoped registration of ledger-core + all five connector servers
+.mcp.json                # Project-scoped registration of ledger-core + all six connector servers
 rezops.policy.yaml       # Fixed action vocabulary + declared impact for ActionProposal (git-tracked, inputs only)
 _bmad-output/            # Planning artifacts, spec, architecture, per-story specs, deferred-work log
 ```

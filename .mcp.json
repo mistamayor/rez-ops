@@ -23,6 +23,10 @@
     "google-drive": {
       "command": "uv",
       "args": ["run", "python", "-m", "connectors.google_drive.server"]
+    },
+    "sharepoint": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "connectors.sharepoint.server"]
     }
   }
 }
