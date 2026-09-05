@@ -664,6 +664,28 @@
       </div>
     </section>
 
+    <!-- 5b: EVIDENCE & POLICY (later extension) -->
+    <section class="slide" data-title="Evidence & Policy">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-flag"/></svg> Extension — Evidence &amp; Policy</span>
+        <h1 class="slide-title">Propose, never execute</h1>
+        <h2 class="slide-sub">AD-11 · AD-12 — a later addition, not part of v1. Read-only-first still holds; action is now an explicitly-gated door, and nothing walks through it yet.</h2>
+        <div class="grid-2">
+          <div class="decision-card c-ledger">
+            <span class="ad-id">AD-11 · Evidence boundary</span>
+            <p class="decision-text">Voice can make a claim ("this runbook looks stale") as an <code>EvidenceBundle</code> — but only ledger-core computes its <code>confidence</code>, from the cited facts, using one documented method. A caller-supplied confidence value is a schema violation, same as a connector-supplied <code>tier_sla</code> under AD-9.</p>
+            <p class="prevents"><b>Prevents:</b> a claim existing as unattributed prose; Voice self-supplying the very confidence score AD-12's policy evaluation reads — reopening, one layer up, the exact loophole AD-12 exists to close.</p>
+          </div>
+          <div class="decision-card c-ledger">
+            <span class="ad-id">AD-12 · ActionProposal &amp; the Policy Engine</span>
+            <p class="decision-text">Voice proposes an action from a fixed vocabulary — exactly <code>rezops.policy.yaml</code>'s keys, nowhere else — citing at least one <code>EvidenceBundle</code>. Ledger-core alone resolves <code>policy_decision</code> (<code>automatic</code> · <code>requires_approval</code> · <code>denied</code>) from action risk, target criticality, and the <em>minimum</em> confidence across the cited evidence.</p>
+            <p class="prevents"><b>Prevents:</b> the LLM ever deciding for itself whether an action is permitted — the one property this layer exists to guarantee.</p>
+          </div>
+        </div>
+        <div class="callout" style="margin-top:22px;"><svg class="icon" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;"><use href="#i-ban"/></svg><strong>No executor exists.</strong> <code>policy_decision</code> is recorded, never acted on — even <code>automatic</code> triggers nothing: not an external call, not an internally-triggered <code>Draft</code>. Building something that consumes it is a separate, later decision, made deliberately — not a default extrapolation from this slide existing.</div>
+      </div>
+    </section>
+
     <!-- 6: OPERATIONAL ENVELOPE -->
     <section class="slide" data-title="Operational Envelope">
       <div class="slide-inner">
@@ -829,7 +851,7 @@
           </div>
           <div class="deferred-item">
             <svg class="icon"><use href="#i-warn"/></svg>
-            <div><div class="what">Write-back / auto-actioning against systems of record</div><div class="why">Human-approval non-negotiable comes first, per the brief; AD-6 keeps the boundary ready for it, not built yet.</div></div>
+            <div><div class="what">The Executor — actually performing a policy-approved <code>ActionProposal</code></div><div class="why">AD-12 computes and records <code>policy_decision</code>; nothing consumes it to act. A deliberate future decision, not a default extrapolation from AD-12 existing.</div></div>
           </div>
           <div class="deferred-item">
             <svg class="icon"><use href="#i-box"/></svg>
@@ -857,7 +879,7 @@
           <div class="panel">
             <div class="np-row">
               <svg class="icon" style="color:var(--sensor);"><use href="#i-sensor"/></svg>
-              <div><span class="label">Read-only-first</span><span class="txt">Sensors only fetch and normalize. AD-6's draft-not-send boundary blocks any write path from existing, even by accident.</span></div>
+              <div><span class="label">Read-only by default; action is an explicit, gated door</span><span class="txt">Sensors only fetch and normalize. AD-6 blocks any write path from existing by accident; AD-11/AD-12 add a named door for proposing a claim or action — but no executor exists behind it.</span></div>
             </div>
             <div class="np-row">
               <svg class="icon" style="color:var(--ledger);"><use href="#i-ledger"/></svg>
