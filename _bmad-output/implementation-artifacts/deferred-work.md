@@ -182,6 +182,30 @@
   summary: `_compute_policy_decision`'s `min()` over cited bundles' confidence has no defensive type/range check before calling `min()` -- would raise an unhandled `TypeError` rather than a clean validation error if a bundle's `confidence` were ever non-numeric.
   evidence: Story 12's `EvidenceBundle.confidence` is already guaranteed to be a valid float by construction, so this has no realistic trigger today; worth hardening only if that guarantee is ever relaxed.
 
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/14-google-drive-connector.md`
+  summary: `_build_source`'s character sanitization can theoretically collide two distinct `file_id`s into an identical source string -- same accepted risk class as every other connector's identical deferral (git/ticketing/calendar/CMDB).
+  evidence: Extremely unlikely in practice; not worth a fix until `source` is consumed as more than a display/audit string.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/14-google-drive-connector.md`
+  summary: HTTP 403 from the Drive API is always treated as `AuthenticationError`, but Google also returns 403 for transient rate/quota errors (e.g. `userRateLimitExceeded`) -- indistinguishable here from a genuine permission failure. No dedicated 429/retry-backoff handling either.
+  evidence: Same category as the ticketing/calendar/CMDB connectors' existing 429/retry-backoff deferrals; fine for a low-frequency, on-demand tool.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/14-google-drive-connector.md`
+  summary: The connector doesn't surface whether a file is `trashed` (deleted) -- a trashed file's `modifiedTime` can look "not stale" while the document no longer meaningfully exists.
+  evidence: Real, useful signal for a "document status" connector, but outside this story's frozen field scope (`modifiedTime`/`lastModifyingUser` only); a reasonable follow-up enhancement, not a defect in what was built.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/14-google-drive-connector.md`
+  summary: The Drive API response's `id` field is requested but never verified against the requested `file_id`.
+  evidence: Low real-world risk since the request URL already scopes the lookup to one file id; defensive check with no realistic trigger today.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/14-google-drive-connector.md`
+  summary: No length/format upper bound on `file_id`/`artifact_type`/`artifact_id` beyond non-empty-string -- same category as other connectors' accepted no-length-bound gaps.
+  evidence: Low risk since the only caller today is Voice itself, not untrusted input.
+
+- source_spec: none
+  summary: Credential validation across every connector (calendar, ticketing, CMDB, and now Google Drive) only rejects ASCII control characters, not general non-ASCII input (e.g. an accented character or emoji in a token) -- a non-ASCII credential could raise an untyped `UnicodeEncodeError` from httpx's header encoding, escaping uncaught.
+  evidence: Pre-existing gap across the whole connector family, not specific to any one story (found during Story 14's review, which mirrors the same `_CONTROL_CHAR_RE` pattern every other connector already uses) -- worth a dedicated cross-connector hardening pass rather than an ad-hoc fix in just one connector.
+
 - source_spec: none
   summary: `ledger_core.projection.get_record` (a single-artifact lookup, unlike `list_records`/`get_coverage_map`) doesn't catch `LogFormatError` for a corrupted artifact-type log -- it propagates raw rather than degrading gracefully (no sentinel-record pattern at this granularity). Found via a Story 13 hardening pass: `create_action_proposal`'s own `get_record` call for the target was patched to fail open around this (treats a corrupted target log as unknown criticality), but the root cause in `get_record`/`ledger_get_record` itself remains -- a corrupted log still crashes a direct single-artifact lookup.
   evidence: Pre-existing gap predating Story 13, dating back to Story 3/4 (confidence/coverage computation, chat-queryable live state) -- `list_records`/`get_coverage_map` already got the sentinel-record AD-8 treatment (Stories 4/8), but `get_record` (and the `ledger_get_record` MCP tool) never did, since no caller's crash had a visible enough consequence until `create_action_proposal` started depending on it as one step of a larger operation.

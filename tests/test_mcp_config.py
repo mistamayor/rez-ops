@@ -5,6 +5,10 @@ The story's own Acceptance Criterion -- "it registers all five servers
 are given a config-file-sourced credential" -- was previously checked only
 by a manual command in the spec's Verification section, never by
 `uv run pytest`. This module closes that gap.
+
+Story 14 added a sixth server, `google-drive` -- registered in `.mcp.json`
+and reflected below, so a connector shipping unregistered from the real
+product is exactly what these tests catch.
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ _EXPECTED_SERVERS = {
     "ticketing": "connectors.ticketing.server",
     "calendar-google": "connectors.calendar_google.server",
     "cmdb": "connectors.cmdb.server",
+    "google-drive": "connectors.google_drive.server",
 }
 
 
@@ -35,7 +40,7 @@ def test_mcp_config_is_valid_json() -> None:
     assert isinstance(config, dict)
 
 
-def test_mcp_config_registers_exactly_the_five_expected_servers() -> None:
+def test_mcp_config_registers_exactly_the_six_expected_servers() -> None:
     config = _load_config()
     servers = config["mcpServers"]
     assert set(servers.keys()) == set(_EXPECTED_SERVERS.keys())

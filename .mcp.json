@@ -19,6 +19,10 @@
     "cmdb": {
       "command": "uv",
       "args": ["run", "python", "-m", "connectors.cmdb.server"]
+    },
+    "google-drive": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "connectors.google_drive.server"]
     }
   }
 }
