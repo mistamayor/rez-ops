@@ -125,3 +125,52 @@
     Implements AD-7's scheduled-run rule: invoke via
     "claude -p --mcp-config .mcp.json --output-format json" (never --bare);
     failures append to ledger_data/_ops.log.md rather than failing silently.
+- id: "12"
+  title: Evidence boundary
+  description: >-
+    Add EvidenceBundle to the shared schema and a ledger-core write tool
+    that computes its confidence server-side -- never accepted from the
+    caller (SPEC CAP-9).
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Implements AD-11. The load-bearing rule: ledger-core -- never Voice --
+    computes EvidenceBundle.confidence, using one documented method (exact
+    formula deferred, same pattern as AD-5's confidence formula). A
+    caller-supplied confidence value is a schema violation, exactly like a
+    connector-supplied tier_sla under AD-9. EvidenceRef is a structured
+    {source, field} object, never a bare string. Stored one file per
+    bundle at ledger_data/evidence/{evidence_id}.md, created-only (no
+    update/delete) -- mirrors Draft's simple lifecycle (AD-6), not AD-3's
+    log-and-projection pattern, since a bundle is never itself approved or
+    denied.
+- id: "13"
+  title: ActionProposal and the Policy Engine
+  description: >-
+    Add ActionProposal to the shared schema and ledger-core's policy
+    evaluation -- Voice proposes an action citing evidence, ledger-core
+    alone computes policy_decision (SPEC CAP-10). No executor: nothing
+    consumes policy_decision to act.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Implements AD-12. Depends on Story 12's EvidenceBundle -- every
+    ActionProposal must cite at least one. The action vocabulary is
+    exactly rezops.policy.yaml's top-level keys, no other source, no
+    freeform names; naming an undeclared action or citing no evidence is
+    rejected before anything is recorded. Ledger-core -- never Voice --
+    computes policy_decision (automatic | requires_approval | denied)
+    from the named action's config-declared risk/impact, the target's
+    criticality (a target with no LedgerRecord/tier_sla yet resolves to
+    the most conservative tier, never a guess, mirroring AD-10), and the
+    MINIMUM confidence across every cited EvidenceBundle (never an
+    average). A caller-supplied policy_decision is a schema violation.
+    Unlike Draft/EvidenceBundle, ActionProposal has a real lifecycle
+    (proposed, then decided), so it extends AD-3's append-only/projection
+    discipline to one flat log, ledger_data/action_proposals.log.md
+    (proposed/decided events) -- never one-file-per-proposal, and never a
+    hand-edited field on an in-place record. Never clause is structural,
+    not temporal: nothing acts on policy_decision regardless of value --
+    not an external call, not an internally-triggered Draft write, not any
+    other component's write path. No Executor exists or is built in this
+    story.
