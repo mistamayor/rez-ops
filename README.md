@@ -9,21 +9,24 @@ Full rationale lives in the planning artifacts below; this file covers what's bu
 **Sensors–Ledger–Voice**, three layers, each an MCP-server boundary:
 
 - **Sensors** (`connectors/`) — dumb, read-only, domain-scoped MCP servers. Each fetches raw facts from one external system and normalizes them into `RawFact`. No freshness, confidence, or ownership logic.
-- **Ledger** (`ledger_core/`) — one MCP server, sole owner of the Freshness Ledger: append-only event log, confidence/coverage computation, live queries.
-- **Voice** (external) — the orchestrating coding-agent runtime (Claude Code, or any MCP-compatible client). Calls Sensors and Ledger, presents output. Holds no domain logic of its own. **You** are the Voice's operator — everything in the User Guide below happens by talking to Claude Code (or another MCP client) in this repo, not by running Python directly.
+- **Ledger** (`ledger_core/`) — one MCP server, sole owner of the Freshness Ledger: append-only event log, confidence/coverage computation, live queries, evidence bundles, and action-proposal policy evaluation.
+- **Voice** (external) — the orchestrating coding-agent runtime (Claude Code, or any MCP-compatible client). Calls Sensors and Ledger, presents output, and may cite facts as evidence or propose an action — but never computes confidence, policy, or any other derived value itself. Holds no domain logic of its own. **You** are the Voice's operator — everything in the User Guide below happens by talking to Claude Code (or another MCP client) in this repo, not by running Python directly.
+
+Read-only observation is the default and everything the first 11 stories built. A later extension (AD-11, AD-12) adds a second, explicitly-gated capability on top, without changing how facts are observed or state is derived: Voice may *propose* a claim (`EvidenceBundle`) or an action (`ActionProposal`) for ledger-core to evaluate — see User Guide steps 8–9. Nothing in this repo executes a proposed action; there is no Executor.
 
 Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-Resillience-Ops-2026-08-12/`](_bmad-output/planning-artifacts/architecture/architecture-Resillience-Ops-2026-08-12/) (`ARCHITECTURE-SPINE.md` for the build-facing contract, `solution-design.md` for the rationale, `walkthrough-deck.html` for a visual walkthrough). Machine contract: [`_bmad-output/specs/spec-rez-ops/SPEC.md`](_bmad-output/specs/spec-rez-ops/SPEC.md).
 
 ## Status
 
-All 11 planned stories shipped, 399 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
+All 13 planned stories shipped, 494 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
 
 **Built:**
 - Shared `RawFact`/`LedgerRecord` schema and append-only ledger core (confidence, coverage, live queries)
 - Four Sensors: git (local, no credentials needed), ServiceNow ticketing, Google Calendar, ServiceNow CMDB
 - Ownership inference/arbitration and orphan-risk detection, draft-not-send outbound content, a periodic briefing aggregating what needs a decision today, and `.mcp.json` + `ops/run_scheduled_briefing.py` for OS-scheduled headless operation with explicit failure logging
+- Evidence-backed claims (`EvidenceBundle`) and policy-gated action proposals (`ActionProposal`) — a later extension beyond the original 11 stories; see User Guide steps 8–9
 
-**Not yet done:** registering an actual cron/launchd job on any machine — `ops/README.md` documents how, but nothing installs one automatically. Known gaps and accepted risks are tracked in [`_bmad-output/implementation-artifacts/deferred-work.md`](_bmad-output/implementation-artifacts/deferred-work.md).
+**Not yet done:** registering an actual cron/launchd job on any machine — `ops/README.md` documents how, but nothing installs one automatically. An Executor that actually performs a policy-approved `ActionProposal` against an external system doesn't exist — a separate, later, deliberate decision, not a default extrapolation from `ActionProposal` existing. Known gaps and accepted risks are tracked in [`_bmad-output/implementation-artifacts/deferred-work.md`](_bmad-output/implementation-artifacts/deferred-work.md).
 
 ## Requirements
 
@@ -35,7 +38,7 @@ All 11 planned stories shipped, 399 tests passing. See [`_bmad-output/specs/spec
 
 ```bash
 uv sync
-uv run pytest -v      # 399 tests, all mocked/local — no live credentials needed to run the suite
+uv run pytest -v      # 494 tests, all mocked/local — no live credentials needed to run the suite
 ```
 
 This is enough to develop and test Rez Ops. To actually *use* it against real systems, continue to the User Guide.
@@ -84,6 +87,8 @@ Claude Code detects `.mcp.json` automatically and (on first use) will prompt you
 - **RawFact vs. LedgerRecord** — a connector tool returns a *RawFact*: one observed fact from one source system, with no confidence or ownership attached (AD-9). Calling `ledger_ingest_raw_fact` records that fact into the ledger's append-only log. A *LedgerRecord* (what you get back from `ledger_get_record`/`ledger_list_records`) is ledger-core's computed view over every fact ever ingested for that artifact — confidence, escalation owner, and orphan-risk status are all derived, never something you set directly.
 - **Confidence is never hidden** — every record's `confidence` is one of `agent-verified`, `manual`, or `unknown`. There's no "assume it's fine" state; if nothing has ever ingested a fact for an artifact, it's `unknown`, visibly.
 - **Escalation owner & orphan-risk** — ledger-core picks one owner per artifact from whichever of these fields is present, in priority order: CMDB's `support_group` > ticketing's `assigned_to` > calendar's `organizer_email`. An artifact with facts but none of those three fields is *orphan-risk* — known to exist, but nobody's on the hook for it.
+- **`EvidenceBundle`** — a citable, evidence-backed claim: `claim` + `reasoning` (your text) plus `evidence` (a list of citations, each naming one artifact and either a fact's `source` or a `LedgerRecord` field). `confidence` is never something you set — ledger-core computes it as the fraction of citations that actually resolve against current ledger state.
+- **`ActionProposal` & `policy_decision`** — a proposed action (e.g. `create_ticket`), citing at least one `EvidenceBundle`. `impact` and `policy_decision` (`automatic`/`requires_approval`/`denied`) are both ledger-core-computed, never something you set. **Nothing executes a proposal** — `policy_decision` is recorded and returned, that's it. There is no Executor in this system.
 
 ### 4. The tools
 
@@ -138,7 +143,23 @@ Rez Ops never sends anything on its own (AD-6) — it only prepares a draft for 
 
 calls `ledger_create_draft`, which defaults `recipient` to that artifact's computed escalation owner (or leaves it unset if the artifact is orphan-risk — never a guess). The draft is written to `ledger_data/drafts/{draft_id}.md`, a plain git-tracked markdown file you can also open and read directly. List everything pending with `ledger_list_drafts()`.
 
-### 8. Running it unattended
+### 8. Making an evidence-backed claim
+
+Beyond reporting a fact, Voice can back a *claim* with citations rather than asserting it as unattributed prose:
+
+> "Claim that `runbooks/payments-service`'s recovery documentation looks stale, citing its last-verified fact and its escalation-owner field as evidence."
+
+calls `ledger_create_evidence`, which computes `confidence` itself — the fraction of your citations that actually resolve against current ledger state. If you cite something that's since gone stale or never existed, that citation just doesn't resolve; the bundle is still created, honestly scored (even `confidence: 0.0`), never rejected for having weak evidence. List everything created with `ledger_list_evidence()`.
+
+### 9. Proposing an action (never executed)
+
+Voice can propose a system-state-changing action — but only ledger-core decides whether it would need approval, and nothing in this repo ever actually performs it:
+
+> "Propose creating a ticket for `runbooks/payments-service`, citing the evidence bundle from before."
+
+calls `ledger_create_action_proposal`. `action` must be one of the names declared in [`rezops.policy.yaml`](rezops.policy.yaml) (currently `create_ticket`, `disable_credential`) — never freeform. Ledger-core computes `impact` (copied from that action's declared risk in the policy file) and `policy_decision` (`automatic`/`requires_approval`/`denied`) from the minimum confidence across your cited evidence and the target's known criticality — you never set either. **`automatic` won't actually happen against real data yet** (it requires a target criticality signal, `tier_sla`, that no story has wired up yet — see `deferred-work.md`), and even if it did, nothing consumes the decision to act on it. List every proposal and its decision with `ledger_list_action_proposals()`.
+
+### 10. Running it unattended
 
 `ops/run_scheduled_briefing.py` invokes `claude -p --mcp-config .mcp.json --output-format json` non-interactively and logs any failure (never fails silently) to `ledger_data/_ops.log.md`. Full setup, including sample crontab/launchd snippets, is in [`ops/README.md`](ops/README.md) — registering an actual scheduled job is a manual step nothing in this repo does for you.
 
@@ -148,7 +169,7 @@ calls `ledger_create_draft`, which defaults `recipient` to that artifact's compu
 
 ```
 shared/ledger_schema/   # RawFact (connector-writable) / LedgerRecord (ledger-core-only) — the shared schema
-ledger_core/            # Ledger MCP server: append-only log, confidence, coverage, ownership, drafts, briefing
+ledger_core/            # Ledger MCP server: append-only log, confidence, coverage, ownership, drafts, briefing, evidence, action proposals
 connectors/
   git_repo/              # Sensor: local git "last touched" metadata — no credentials needed
   ticketing/              # Sensor: ServiceNow Table API (incidents/tasks)
@@ -156,13 +177,16 @@ connectors/
   cmdb/                     # Sensor: ServiceNow Table API (configuration items)
 ops/                     # Scheduled headless invocation wrapper + failure logging (AD-7)
 tests/                   # One test file per module, httpx.MockTransport for every HTTP connector
-ledger_data/             # Runtime state: append-only per-artifact-type logs (git-committed, human-readable)
+ledger_data/             # Runtime state: append-only logs (git-committed, human-readable)
+  evidence/               # EvidenceBundle records, one file per bundle
+  action_proposals.log.md # ActionProposal proposed/decided events (append-only log, not per-artifact-type)
 .mcp.json                # Project-scoped registration of ledger-core + all four connector servers
+rezops.policy.yaml       # Fixed action vocabulary + declared impact for ActionProposal (git-tracked, inputs only)
 _bmad-output/            # Planning artifacts, spec, architecture, per-story specs, deferred-work log
 ```
 
 ## Non-negotiables (v1)
 
-- **Read-only-first** — no connector writes to any external system of record.
+- **Read-only by default; action is an explicit, separately-gated capability** — no connector writes to any external system of record. Voice may propose a claim or an action (see User Guide steps 8–9), but proposing is not executing: there is no Executor anywhere in this repo, and a computed `policy_decision` is recorded, never acted on.
 - **Graceful degradation** — any failure fails open to today's manual baseline; Rez Ops is additive, never a dependency of the program it observes.
 - **Never hide uncertainty** — every derived value carries an explicit confidence state; a corrupted or missing data source surfaces visibly rather than disappearing.
