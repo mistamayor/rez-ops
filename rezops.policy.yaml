@@ -1,0 +1,17 @@
+# rezops.policy.yaml -- AD-12: per-action risk/impact declarations.
+#
+# Inputs only -- ledger-core (ledger_core/action_proposals.py) is the sole
+# evaluator of what these declarations mean for a given ActionProposal's
+# policy_decision. Kept separate from rezops.config.yaml's tiering/connector
+# inputs (AD-2's one-responsibility-per-surface lesson applies to config
+# files too).
+#
+# Top-level keys are the *entire* action vocabulary Voice may name in an
+# ActionProposal -- exactly these keys, never freeform, never any other
+# source (AD-12). Each action declares its own impact: low, medium, or high.
+
+create_ticket:
+  impact: low
+
+disable_credential:
+  impact: high

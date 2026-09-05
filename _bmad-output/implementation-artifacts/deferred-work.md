@@ -169,3 +169,15 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/12-evidence-boundary.md`
   summary: `EVIDENCE_FORMAT_ERROR_MARKER`'s sentinel convention isn't exported/documented at the MCP tool-response level for a client to reliably distinguish a corrupted-file placeholder from a legitimate bundle.
   evidence: Same category as Story 10's accepted sentinel-dedup non-behavior; a real gap but low priority for a single-caller (Voice) system today.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/13-action-proposal-and-the-policy-engine.md`
+  summary: The two-line `proposed`+`decided` append to `action_proposals.log.md` has no locking against a concurrent writer -- two processes' lines could theoretically interleave.
+  evidence: Same root category as the project's existing no-file-locking deferral (Story 1); low real-world risk for a single-process, on-demand tool with no concurrent writers today.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/13-action-proposal-and-the-policy-engine.md`
+  summary: No pagination or filter-by-`policy_decision`/`action`/`target` on `list_action_proposals`/`ledger_list_action_proposals` -- same category as the existing pagination deferrals for records/coverage/drafts/evidence.
+  evidence: Fine at current scale; revisit alongside the other pagination deferrals once real proposal volume grows.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/13-action-proposal-and-the-policy-engine.md`
+  summary: `_compute_policy_decision`'s `min()` over cited bundles' confidence has no defensive type/range check before calling `min()` -- would raise an unhandled `TypeError` rather than a clean validation error if a bundle's `confidence` were ever non-numeric.
+  evidence: Story 12's `EvidenceBundle.confidence` is already guaranteed to be a valid float by construction, so this has no realistic trigger today; worth hardening only if that guarantee is ever relaxed.

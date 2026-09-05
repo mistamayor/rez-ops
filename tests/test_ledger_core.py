@@ -214,16 +214,19 @@ def test_ledger_record_rejects_invalid_confidence_value() -> None:
 # --- Acceptance: MCP server exposes exactly one read tool -----------------
 
 
-def test_server_exposes_exactly_nine_tools_none_calling_an_external_send_api() -> None:
+def test_server_exposes_exactly_eleven_tools_none_calling_an_external_send_api() -> None:
     """Acceptance criterion (Story 9, extended by Story 10, extended by Story
-    12): a client listing tools sees `ledger_create_draft` and
-    `ledger_list_drafts` alongside the four pre-existing tools, plus
+    12, extended by Story 13): a client listing tools sees `ledger_create_draft`
+    and `ledger_list_drafts` alongside the four pre-existing tools, plus
     `ledger_get_briefing` (Story 10, CAP-7), plus `ledger_create_evidence` and
-    `ledger_list_evidence` (Story 12, AD-11, CAP-9), and (by construction --
-    see the ingestion/coverage/list/draft/briefing/evidence tests below, and
-    `ledger_core/drafts.py`'s, `ledger_core/briefing.py`'s, and
-    `ledger_core/evidence.py`'s complete absence of any `httpx`/network
-    import) none of them calls an external send API.
+    `ledger_list_evidence` (Story 12, AD-11, CAP-9), plus
+    `ledger_create_action_proposal` and `ledger_list_action_proposals` (Story
+    13, AD-12, CAP-10), and (by construction -- see the
+    ingestion/coverage/list/draft/briefing/evidence/action-proposal tests
+    below, and `ledger_core/drafts.py`'s, `ledger_core/briefing.py`'s,
+    `ledger_core/evidence.py`'s, and `ledger_core/action_proposals.py`'s
+    complete absence of any `httpx`/network import) none of them calls an
+    external send API.
     """
     tools = asyncio.run(mcp.list_tools())
     names = [tool.name for tool in tools]
@@ -237,6 +240,8 @@ def test_server_exposes_exactly_nine_tools_none_calling_an_external_send_api() -
         "ledger_create_evidence",
         "ledger_list_evidence",
         "ledger_get_briefing",
+        "ledger_create_action_proposal",
+        "ledger_list_action_proposals",
     ]
 
 

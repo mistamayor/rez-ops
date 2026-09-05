@@ -1,25 +1,34 @@
 """Ledger-core MCP server (AD-1, AD-2): ledger-core is its own MCP server.
 
-Exposes nine tools: a read/query surface over projection.py
+Exposes eleven tools: a read/query surface over projection.py
 (`ledger_get_record`, `ledger_get_coverage`, `ledger_list_records`), the one
 and only ingestion path into the append-only log (`ledger_ingest_raw_fact`),
 the draft-not-send outbound content queue over drafts.py
 (`ledger_create_draft`, `ledger_list_drafts` -- AD-6, CAP-6, Story 9), the
 periodic briefing over briefing.py (`ledger_get_briefing` -- CAP-7, Story
-10), and the evidence-backed-claims queue over evidence.py
-(`ledger_create_evidence`, `ledger_list_evidence` -- AD-11, CAP-9, Story 12).
-Ledger state can only ever be changed by appending to the log (AD-3) --
-`ledger_ingest_raw_fact` constructs a `RawFact` and calls `append_event`; it
-has no other side effect and no `confidence` parameter (confidence is
-computed exclusively by `projection.get_record`, AD-5). `ledger_create_draft`
-and `ledger_create_evidence` are the only other tools with a write side
-effect -- each writes exactly one new file (under `ledger_data/drafts/` or
-`ledger_data/evidence/` respectively) and calls no external send/write API
-of any kind (AD-6, AD-11). Neither `ledger_create_evidence` nor
+10), the evidence-backed-claims queue over evidence.py
+(`ledger_create_evidence`, `ledger_list_evidence` -- AD-11, CAP-9, Story 12),
+and the policy-gated action-proposal queue over action_proposals.py
+(`ledger_create_action_proposal`, `ledger_list_action_proposals` -- AD-12,
+CAP-10, Story 13). Ledger state can only ever be changed by appending to the
+log (AD-3) -- `ledger_ingest_raw_fact` constructs a `RawFact` and calls
+`append_event`; it has no other side effect and no `confidence` parameter
+(confidence is computed exclusively by `projection.get_record`, AD-5).
+`ledger_create_draft`, `ledger_create_evidence`, and
+`ledger_create_action_proposal` are the only other tools with a write side
+effect -- each writes exactly one new file, or appends exactly two new log
+lines (under `ledger_data/drafts/`, `ledger_data/evidence/`, or
+`ledger_data/action_proposals.log.md` respectively) and calls no external
+send/write API of any kind, and no other component's write path, of any kind
+(AD-6, AD-11, AD-12). Neither `ledger_create_evidence` nor
 `ledger_list_evidence` accepts a `confidence` parameter -- confidence is
 computed exclusively by `evidence.create_evidence_bundle`, from the cited
-evidence, never accepted as input (AD-11). `ledger_get_briefing`, like every
-other read tool here, performs no write of any kind -- it composes
+evidence, never accepted as input (AD-11). Neither
+`ledger_create_action_proposal` nor `ledger_list_action_proposals` accepts an
+`impact` or `policy_decision` parameter -- both are computed exclusively by
+`action_proposals.create_action_proposal`, never accepted as input (AD-12).
+`ledger_get_briefing`, like every other read tool here, performs no write of
+any kind -- it composes
 `get_record`/`list_records`/`list_drafts`/`get_coverage_map`'s own results,
 nothing more.
 """
@@ -30,6 +39,11 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from ledger_core.action_proposals import (
+    ActionProposal,
+    create_action_proposal,
+    list_action_proposals,
+)
 from ledger_core.briefing import get_briefing
 from ledger_core.drafts import Draft, create_draft, list_drafts
 from ledger_core.evidence import (
@@ -82,6 +96,26 @@ def _draft_to_dict(draft: Draft) -> dict[str, Any]:
         "body": draft.body,
         "recipient": draft.recipient,
         "created_at": draft.created_at,
+    }
+
+
+def _action_proposal_to_dict(proposal: ActionProposal) -> dict[str, Any]:
+    """The one ActionProposal-to-dict shape both action-proposal tools serialize.
+
+    Shared by `ledger_create_action_proposal` and `ledger_list_action_proposals`
+    so a future `ActionProposal` field only needs to be added here once.
+    """
+    return {
+        "proposal_id": proposal.proposal_id,
+        "action": proposal.action,
+        "target_artifact_type": proposal.target_artifact_type,
+        "target_artifact_id": proposal.target_artifact_id,
+        "reason": proposal.reason,
+        "evidence": list(proposal.evidence),
+        "impact": proposal.impact,
+        "policy_decision": proposal.policy_decision,
+        "proposed_at": proposal.proposed_at,
+        "decided_at": proposal.decided_at,
     }
 
 
@@ -403,6 +437,75 @@ def ledger_get_briefing() -> dict[str, Any]:
         },
         "generated_at": briefing.generated_at,
     }
+
+
+@mcp.tool(name="ledger_create_action_proposal")
+def ledger_create_action_proposal(
+    action: str,
+    target_artifact_type: str,
+    target_artifact_id: str,
+    reason: str,
+    evidence: list[str],
+) -> dict[str, Any]:
+    """Propose one system-state-changing action and record ledger-core's policy decision (AD-12, CAP-10, Story 13).
+
+    `action` must be a key declared in `rezops.policy.yaml` -- never
+    freeform, never any other source; naming anything else raises
+    `ActionProposalValidationError` (surfaced as a structured, non-crashing
+    MCP error, the same mechanism proven for every other tool here) and
+    writes nothing. `evidence` is a list of `EvidenceBundle.evidence_id`
+    strings -- must be non-empty, and every id must resolve to a bundle that
+    actually exists (`ledger_core.evidence.list_evidence`); citing zero, or
+    an id that doesn't exist, is likewise rejected before anything is
+    written. `target_artifact_type`/`target_artifact_id` are validated
+    against the same identifier charset every other component enforces, with
+    no requirement that the target actually exist beyond resolving its
+    (possibly empty/unknown) `LedgerRecord` -- the same non-validation
+    precedent `ledger_create_draft` already established for its own
+    `artifact_type`/`artifact_id`. `reason` must be non-empty and
+    non-whitespace-only.
+
+    This tool signature has **no `impact` and no `policy_decision`
+    parameter at all** -- a caller cannot pass either through, let alone
+    have it accepted (AD-12). `impact` is copied from the named action's
+    config-declared value in `rezops.policy.yaml`; `policy_decision`
+    (`automatic`/`requires_approval`/`denied`) is computed from that
+    `impact`, the **minimum** confidence across every cited `EvidenceBundle`
+    (never an average), and whether the target's `tier_sla` is currently
+    known (`ledger_core.projection.get_record` -- always `None` against
+    today's real data, AD-9, so `automatic` is never actually expected to
+    fire yet -- an honest v1 characteristic, not a bug).
+
+    The only side effect is appending exactly two new lines -- a `proposed`
+    event immediately followed by a `decided` event -- to the single,
+    project-wide, git-tracked `ledger_data/action_proposals.log.md` (AD-3,
+    AD-12). Nothing here, or anywhere else in this tool's call graph,
+    consumes the resulting `policy_decision` to actually perform the
+    action -- no external write/send API call, no internally-triggered
+    `Draft` creation, no other component's write path. There is no separate,
+    later human-approval step in this phase, and no update/resubmission
+    tool: creating a proposal always immediately decides it, once.
+    """
+    proposal = create_action_proposal(
+        action=action,
+        target_artifact_type=target_artifact_type,
+        target_artifact_id=target_artifact_id,
+        reason=reason,
+        evidence=evidence,
+    )
+    return _action_proposal_to_dict(proposal)
+
+
+@mcp.tool(name="ledger_list_action_proposals")
+def ledger_list_action_proposals() -> list[dict[str, Any]]:
+    """List every ActionProposal folded from `ledger_data/action_proposals.log.md` (AD-12, Story 13).
+
+    Read-only: never appends to the log. Computed by purely replaying that
+    one flat, project-wide log (AD-3) -- never cached -- one record per
+    `proposal_id`, in first-proposed order. Returns `[]` -- never raises --
+    when the log doesn't exist yet (no proposal has ever been created).
+    """
+    return [_action_proposal_to_dict(proposal) for proposal in list_action_proposals()]
 
 
 def main() -> None:
