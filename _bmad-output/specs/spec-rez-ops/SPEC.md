@@ -23,7 +23,7 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
   - **success:** Every tracked artifact type has a queryable ledger record whose fields are populated or explicitly marked unknown, with an expiry rule that can trigger a staleness flag.
 
 - **CAP-2 — Read-only connectors**
-  - **intent:** Ingest calendar, ticketing, git, and CMDB data as raw observed facts without writing back to any of those systems.
+  - **intent:** Ingest calendar, ticketing, git, CMDB, and document-store (Google Drive, SharePoint) data as raw observed facts without writing back to any of those systems.
   - **success:** Each connector returns normalized raw facts to the runtime; no connector call in v1 issues a write, update, or delete against its external system.
 
 - **CAP-3 — Confidence/coverage computation**

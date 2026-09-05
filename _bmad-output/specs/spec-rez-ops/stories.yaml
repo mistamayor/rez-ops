@@ -174,3 +174,37 @@
     not an external call, not an internally-triggered Draft write, not any
     other component's write path. No Executor exists or is built in this
     story.
+- id: "14"
+  title: "Google Drive connector"
+  description: >-
+    Fifth Sensor: google_drive_get_document_status against the Google
+    Drive API v3 (SPEC CAP-2 extension). Closes a real gap: BIAs/RACI/
+    tiering docs often live as Drive files, not git/ServiceNow/Calendar/
+    CMDB records.
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implements AD-1/AD-2 against Google Drive API v3. Last-modified
+    metadata only (modifiedTime, lastModifyingUser flattened to a scalar)
+    -- mirrors calendar_get_event_status's shape and its
+    flatten-nested-objects-to-scalars precedent. REZOPS_DRIVE_TOKEN is a
+    separate credential from REZOPS_CALENDAR_TOKEN despite the same Google
+    OAuth ecosystem (AD-7). Apply every hardening lesson from every prior
+    connector's review, including CMDB's regression: redaction must cover
+    both the non-2xx AND malformed-200-body error branches, not just one.
+- id: "15"
+  title: "SharePoint connector"
+  description: >-
+    Sixth Sensor: a document-status connector against Microsoft Graph API
+    (SPEC CAP-2 extension), matching Story 14's shape. New auth pattern
+    for this project -- Microsoft Graph, not Google OAuth or ServiceNow
+    tokens.
+  spec_checkpoint: false
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implements AD-1/AD-2 against Microsoft Graph API. Last-modified
+    metadata only, mirroring Story 14's exact shape and every prior
+    connector's hardening lessons (typed error hierarchy, URL-encoding,
+    HTTPS-only validation, redaction on every error branch). Independent
+    credentials from every other connector, even one already targeting a
+    Microsoft-adjacent system.
