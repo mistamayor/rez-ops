@@ -30,6 +30,7 @@ from ledger_core.drafts import (
     create_draft,
     list_drafts,
 )
+from ledger_core.evidence import create_evidence_bundle, list_evidence
 from ledger_core.log import LogFormatError, append_event, read_events
 from ledger_core.projection import (
     LOG_FORMAT_ERROR_ARTIFACT_ID,
@@ -213,14 +214,16 @@ def test_ledger_record_rejects_invalid_confidence_value() -> None:
 # --- Acceptance: MCP server exposes exactly one read tool -----------------
 
 
-def test_server_exposes_exactly_seven_tools_none_calling_an_external_send_api() -> None:
-    """Acceptance criterion (Story 9, extended by Story 10): a client listing
-    tools sees `ledger_create_draft` and `ledger_list_drafts` alongside the
-    four pre-existing tools, plus `ledger_get_briefing` (Story 10, CAP-7),
-    and (by construction -- see the ingestion/coverage/list/draft/briefing
-    tests below, and `ledger_core/drafts.py`'s and `ledger_core/briefing.py`'s
-    complete absence of any `httpx`/network import) none of them calls an
-    external send API.
+def test_server_exposes_exactly_nine_tools_none_calling_an_external_send_api() -> None:
+    """Acceptance criterion (Story 9, extended by Story 10, extended by Story
+    12): a client listing tools sees `ledger_create_draft` and
+    `ledger_list_drafts` alongside the four pre-existing tools, plus
+    `ledger_get_briefing` (Story 10, CAP-7), plus `ledger_create_evidence` and
+    `ledger_list_evidence` (Story 12, AD-11, CAP-9), and (by construction --
+    see the ingestion/coverage/list/draft/briefing/evidence tests below, and
+    `ledger_core/drafts.py`'s, `ledger_core/briefing.py`'s, and
+    `ledger_core/evidence.py`'s complete absence of any `httpx`/network
+    import) none of them calls an external send API.
     """
     tools = asyncio.run(mcp.list_tools())
     names = [tool.name for tool in tools]
@@ -231,6 +234,8 @@ def test_server_exposes_exactly_seven_tools_none_calling_an_external_send_api() 
         "ledger_list_records",
         "ledger_create_draft",
         "ledger_list_drafts",
+        "ledger_create_evidence",
+        "ledger_list_evidence",
         "ledger_get_briefing",
     ]
 
@@ -300,6 +305,18 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
         server_module,
         "get_briefing",
         lambda: get_briefing(ledger_dir=ledger_dir),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "create_evidence_bundle",
+        lambda claim, reasoning, evidence: create_evidence_bundle(
+            claim=claim, reasoning=reasoning, evidence=evidence, ledger_dir=ledger_dir
+        ),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "list_evidence",
+        lambda: list_evidence(ledger_dir=ledger_dir),
     )
 
 

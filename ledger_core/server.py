@@ -1,20 +1,27 @@
 """Ledger-core MCP server (AD-1, AD-2): ledger-core is its own MCP server.
 
-Exposes seven tools: a read/query surface over projection.py
+Exposes nine tools: a read/query surface over projection.py
 (`ledger_get_record`, `ledger_get_coverage`, `ledger_list_records`), the one
 and only ingestion path into the append-only log (`ledger_ingest_raw_fact`),
 the draft-not-send outbound content queue over drafts.py
-(`ledger_create_draft`, `ledger_list_drafts` -- AD-6, CAP-6, Story 9), and the
+(`ledger_create_draft`, `ledger_list_drafts` -- AD-6, CAP-6, Story 9), the
 periodic briefing over briefing.py (`ledger_get_briefing` -- CAP-7, Story
-10). Ledger state can only ever be changed by appending to the log (AD-3) --
+10), and the evidence-backed-claims queue over evidence.py
+(`ledger_create_evidence`, `ledger_list_evidence` -- AD-11, CAP-9, Story 12).
+Ledger state can only ever be changed by appending to the log (AD-3) --
 `ledger_ingest_raw_fact` constructs a `RawFact` and calls `append_event`; it
 has no other side effect and no `confidence` parameter (confidence is
 computed exclusively by `projection.get_record`, AD-5). `ledger_create_draft`
-is the only other tool with a write side effect -- it writes exactly one new
-file under `ledger_data/drafts/` and calls no external send/write API of any
-kind (AD-6). `ledger_get_briefing`, like every other read tool here, performs
-no write of any kind -- it composes `get_record`/`list_records`/`list_drafts`/
-`get_coverage_map`'s own results, nothing more.
+and `ledger_create_evidence` are the only other tools with a write side
+effect -- each writes exactly one new file (under `ledger_data/drafts/` or
+`ledger_data/evidence/` respectively) and calls no external send/write API
+of any kind (AD-6, AD-11). Neither `ledger_create_evidence` nor
+`ledger_list_evidence` accepts a `confidence` parameter -- confidence is
+computed exclusively by `evidence.create_evidence_bundle`, from the cited
+evidence, never accepted as input (AD-11). `ledger_get_briefing`, like every
+other read tool here, performs no write of any kind -- it composes
+`get_record`/`list_records`/`list_drafts`/`get_coverage_map`'s own results,
+nothing more.
 """
 
 from __future__ import annotations
@@ -25,6 +32,13 @@ from mcp.server.fastmcp import FastMCP
 
 from ledger_core.briefing import get_briefing
 from ledger_core.drafts import Draft, create_draft, list_drafts
+from ledger_core.evidence import (
+    EvidenceBundle,
+    EvidenceRef,
+    EvidenceValidationError,
+    create_evidence_bundle,
+    list_evidence,
+)
 from ledger_core.log import append_event
 from ledger_core.projection import get_coverage_map, get_record, list_records
 from shared.ledger_schema import LedgerRecord, RawFact
@@ -68,6 +82,30 @@ def _draft_to_dict(draft: Draft) -> dict[str, Any]:
         "body": draft.body,
         "recipient": draft.recipient,
         "created_at": draft.created_at,
+    }
+
+
+def _evidence_bundle_to_dict(bundle: EvidenceBundle) -> dict[str, Any]:
+    """The one EvidenceBundle-to-dict shape both evidence tools serialize.
+
+    Shared by `ledger_create_evidence` and `ledger_list_evidence` so a future
+    `EvidenceBundle` field only needs to be added here once.
+    """
+    return {
+        "evidence_id": bundle.evidence_id,
+        "claim": bundle.claim,
+        "confidence": bundle.confidence,
+        "evidence": [
+            {
+                "artifact_type": ref.artifact_type,
+                "artifact_id": ref.artifact_id,
+                "source": ref.source,
+                "field": ref.field,
+            }
+            for ref in bundle.evidence
+        ],
+        "reasoning": bundle.reasoning,
+        "generated_at": bundle.generated_at,
     }
 
 
@@ -250,6 +288,79 @@ def ledger_list_drafts(
         draft_type=draft_type,
     )
     return [_draft_to_dict(draft) for draft in drafts]
+
+
+@mcp.tool(name="ledger_create_evidence")
+def ledger_create_evidence(
+    claim: str,
+    reasoning: str,
+    evidence: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create one EvidenceBundle and write it to `ledger_data/evidence/`.
+
+    `evidence` is a list of structured citation objects -- each an
+    `{"artifact_type": ..., "artifact_id": ..., "source": ...}` or
+    `{"artifact_type": ..., "artifact_id": ..., "field": ...}` dict, never a
+    bare string or other non-dict item (checked explicitly here, before
+    anything is written, and raises `EvidenceValidationError` rather than an
+    unguarded `AttributeError` from calling `.get(...)` on it) -- exactly one
+    of `source`/`field` set per citation. Each dict is then constructed into
+    an `EvidenceRef`, which raises `EvidenceValidationError` (surfaced as a
+    structured, non-crashing MCP error, the same mechanism proven for every
+    other tool here) if that invariant is violated, before anything is
+    written.
+
+    This tool signature has **no `confidence` parameter at all** -- a caller
+    cannot pass one through, let alone have it accepted (AD-11). `confidence`
+    is computed exclusively by `evidence.create_evidence_bundle`, as the
+    fraction of citations that resolve against current ledger state: a
+    source-citation resolves if that artifact's log has an event with that
+    exact `source`; a field-citation resolves if
+    `ledger_core.projection.get_record` reports a non-empty value for that
+    field. A bundle citing nothing that resolves is still created, with
+    `confidence: 0.0` -- never rejected, matching this project's standing
+    refusal to hide bad states rather than surface them.
+
+    `claim`/`reasoning` must each be non-empty, non-whitespace-only strings;
+    `evidence` must be a non-empty list. Any violation raises a typed,
+    non-crashing MCP error and writes nothing. `claim`/`reasoning` content is
+    never inspected or templated beyond that blank check -- opaque
+    caller-supplied text, exactly like `ledger_create_draft`'s
+    `subject`/`body`.
+    """
+    refs = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            raise EvidenceValidationError(
+                "each evidence citation must be a "
+                '{"artifact_type": ..., "artifact_id": ..., "source"-or-"field": ...} '
+                f"object, not {type(item).__name__}"
+            )
+        refs.append(
+            EvidenceRef(
+                artifact_type=item.get("artifact_type"),
+                artifact_id=item.get("artifact_id"),
+                source=item.get("source"),
+                field=item.get("field"),
+            )
+        )
+    bundle = create_evidence_bundle(
+        claim=claim, reasoning=reasoning, evidence=tuple(refs)
+    )
+    return _evidence_bundle_to_dict(bundle)
+
+
+@mcp.tool(name="ledger_list_evidence")
+def ledger_list_evidence() -> list[dict[str, Any]]:
+    """List every EvidenceBundle under `ledger_data/evidence/`.
+
+    Read-only: never mutates a bundle file. Returns `[]` -- never raises --
+    when `ledger_data/evidence/` doesn't exist yet (no bundle has ever been
+    created). If one bundle file is corrupted, it is represented by exactly
+    one sentinel entry rather than aborting the whole listing (AD-8,
+    mirroring `ledger_list_drafts`'s identical isolation).
+    """
+    return [_evidence_bundle_to_dict(bundle) for bundle in list_evidence()]
 
 
 @mcp.tool(name="ledger_get_briefing")

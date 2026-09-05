@@ -149,3 +149,23 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/11-scheduled-headless-operation.md`
   summary: `ledger_data/` is not committed and has no `.gitignore` entry, despite the top-level `README.md` describing it as git-committed -- this story adds `_ops.log.md` (and its README documents `_cron_stdout.log`/`_launchd_stdout.log`/`_launchd_stderr.log`) as more files that could land there ungoverned.
   evidence: Pre-existing gap predating this story (no prior story has committed `ledger_data/` either); the policy decision -- commit runtime state or gitignore it -- is broader than this story's scope.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/12-evidence-boundary.md`
+  summary: No `ledger_get_evidence(evidence_id)` single-item lookup or filter-by-artifact/claim surface -- only `ledger_list_evidence`, which returns every bundle unfiltered and unpaginated.
+  evidence: Same category as the existing no-get-by-id deferral for `Draft` (Story 9); fine at current scale, Story 13's `ActionProposal` only needs to reference a bundle by id it already holds, not look one up generically.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/12-evidence-boundary.md`
+  summary: No retention/pruning/size cap on `ledger_data/evidence/` -- created-only, grows forever.
+  evidence: Same category as the project's existing pagination/size-limit deferrals; revisit once real bundle volume grows.
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/12-evidence-boundary.md`
+  summary: No upper bound on `claim`/`reasoning`/`artifact_type`/`artifact_id` string length -- only non-blank is checked.
+  evidence: Low real-world risk since the only caller today is Voice itself, not untrusted input; revisit if this ever proves a real problem (matches the project's existing pattern of deferring unbounded-input guards until they're demonstrated to matter).
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/12-evidence-boundary.md`
+  summary: `_parse_bundle_file` doesn't validate `generated_at`'s format as a real timestamp, and doesn't reject an unrecognized extra frontmatter key or a blank reasoning body on read (only at create time).
+  evidence: These only matter against a hand-edited or tampered file, not real data this module itself ever writes; low priority defensive parsing, same category as other accepted-but-imperfect parse-time gaps already deferred elsewhere (e.g. Story 8's format-documentation gap).
+
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/12-evidence-boundary.md`
+  summary: `EVIDENCE_FORMAT_ERROR_MARKER`'s sentinel convention isn't exported/documented at the MCP tool-response level for a client to reliably distinguish a corrupted-file placeholder from a legitimate bundle.
+  evidence: Same category as Story 10's accepted sentinel-dedup non-behavior; a real gap but low priority for a single-caller (Voice) system today.
