@@ -75,6 +75,7 @@ rez-ops/
     ticketing/         # Sensor MCP server
     git_repo/          # Sensor MCP server
     cmdb/              # Sensor MCP server
+  executors/           # AD-13 [design only, not yet built]: write-capable siblings of Sensors, one per action/vendor
   ledger_core/         # Ledger MCP server: computation, confidence, ownership arbitration, drafts, evidence, policy
   ledger_data/         # AD-3: append-only logs + materialized state, git-committed
     bia/
@@ -84,11 +85,12 @@ rez-ops/
     test_records/
     drafts/                  # AD-6: pending outbound content, written only via ledger-core's write tool
     evidence/                 # AD-11: EvidenceBundle records, one file per bundle, created-only
-    action_proposals.log.md   # AD-12: proposed/decided events; current state is a projection, same pattern as AD-3
+    action_proposals.log.md   # AD-12: proposed/decided events, built; + AD-14 approved event [design only]
+    action_executions.log.md  # AD-15 [design only, not yet built]: execution-attempt events per proposal_id
     _ops.log.md        # AD-7: scheduled-run failure log
   .mcp.json            # project-scoped MCP server registration
   rezops.config.yaml   # enabled connectors, tier SLA policy (inputs only — AD-9)
-  rezops.policy.yaml   # AD-12: per-action risk/impact rules — inputs only, ledger-core evaluates
+  rezops.policy.yaml   # AD-12: per-action risk/impact rules; + AD-13 authoritative executor per action [design only]
 ```
 
 ## Walking through each design decision
@@ -143,6 +145,22 @@ The reframe worth stating explicitly, because it's the hinge the rest of this se
 
 One more finding sharpened the Never clause itself: "no executor exists *in this phase*" is a statement about today, not a structural guarantee — nothing in that wording stopped an `automatic` decision from quietly triggering an internal write (an AD-6 `Draft`) with no external executor built. The clause now reads structurally: nothing acts on `policy_decision` regardless of its value, full stop. "We haven't built the executor yet" and "nothing can act on this signal" are different guarantees, and only the second is load-bearing.
 
+### Designing the Executor, before building it (AD-13, AD-14, AD-15)
+
+This cluster is a **design-only** session — no code exists for any of it. It came directly out of AD-12's own Never clause, which required exactly this ("building an Executor... requires its own AD before any code writes externally") rather than skipping the requirement or building ahead of it. Unlike AD-11/AD-12, where the shape had already converged through prior conversation, the Executor's shape was genuinely open, so this ran as real coaching — five load-bearing questions, walked one at a time, each with real alternatives.
+
+**Trigger and shape (AD-13).** Two forks resolved together. Does something poll for `automatic`/approved proposals and fire unattended, or does execution only ever happen because a human explicitly names one `proposal_id`? Polling is what would make `automatic` mean something operationally, but it also means a real external write can happen with nobody watching — the choice was human-explicit-invoke only; autonomous execution is a deliberate, later step, not bundled in. And is the Executor a new ledger-core tool, a standalone script, or a new component category? A ledger-core tool would mean vendor-specific write code living inside the one server meant to stay pure computation — the anti-pattern AD-2 already forbids for Sensors, just on the write side. The resolution: **Executors**, a new category mirroring Sensors' one-server-per-domain pattern but for writes.
+
+**Where the reviewer gate earned its keep hardest yet.** The first draft said an Executor "re-fetches its target `ActionProposal`, confirms `policy_decision` is favorable... before performing the real write" — reasonable-sounding, and wrong. Two reviewers found the same root problem from different angles: the rubric walker saw the entire approval/denial/idempotency chain specified as something *each Executor implements for itself*, breaking the one pattern this architecture has enforced since AD-5 (ledger-core alone computes every derived/authorization value). The adversarial reviewer found the implementation-side twin: no tool lets an Executor address a proposal by id at all, so "re-fetches" was equally satisfied by an Executor reading the log directly and re-deriving ledger-core's own projection logic outside `ledger_core/` — letting two Executors disagree about what "favorable" even means. One fix closes both: `ledger_authorize_execution(proposal_id)`, the *only* sanctioned way to address a proposal by id and the *only* place every check happens. An Executor doesn't decide anything; it asks, and ledger-core decides.
+
+**The approval step's real design question wasn't whether it exists, but whose approval and how attested.** The adversarial reviewer's sharpest finding: a freeform `approver` argument lets Voice simply assert "the service owner approved this" with nobody having said so — defeating the whole point. The fix ties `approver` to a fixed, non-Voice-suppliable operator identity (an env var, the same discipline AD-7 already established for credentials). Not a workaround — Rez Ops v1 has exactly one operator, so "who approved this" can only mean "the person running this session" until a real identity system exists, which SPEC.md's Non-goals already rule out for v1.
+
+**The single hardest sentence in the whole design was "on explicit human instruction."** The first draft licensed execution to "a deliberate, explicit human (or Voice, on explicit human instruction)" — unenforceable by construction, since Voice is the only thing that ever calls an MCP tool here. Nothing distinguishes genuine human intent from Voice's own initiative for any tool built so far, but every other write is low-stakes and reversible if Voice gets it wrong — execution is the first point with a real, potentially-irreversible consequence, which is exactly why this mattered here and nowhere else. The fix reaches for an actual protocol mechanism instead of a hand-rolled convention: MCP's own elicitation primitive, letting a server ask the connected client to interactively confirm before proceeding — confirmed to exist in the pinned spec version during this session's own version-currency check.
+
+**Execution got its own log, not a third event type bolted onto the existing one.** The obvious move — `executed` alongside `proposed`/`decided` — doesn't fit: that log assumes exactly one of each event per proposal (Story 13 already treats a second `decided` as corruption), but a real write can fail and need a retry. The resolution is a separate log, `action_executions.log.md`, tracking zero-or-more attempts — which also gives idempotency a real, checkable home: reject re-executing a proposal with a *successful* attempt, allow retrying one whose attempts so far only failed. `approved`, by contrast, stayed on the original log — a one-time state change like `decided`, not a repeatable attempt.
+
+**One gap stays open, named rather than quietly inherited.** Appending the execution log's `attempted` marker at authorization time narrows, but doesn't provably close, the race window between two concurrent invocations of the same proposal — the same root category as the project's long-standing no-file-locking deferral, called out explicitly here because a double-created ticket is a more visible failure than an interleaved log line. No automatic rollback exists either, or ever will — reversing an executed action is a manual human action entirely outside this system, the same category AD-6 already established for sending a drafted message.
+
 ## Stack rationale
 
 Every stack choice was made or corrected against live web research rather than assumed from training data, because a fast-moving CLI and a fast-moving protocol are exactly the kind of thing that goes stale between a model's cutoff and the day the code actually gets written.
@@ -181,11 +199,17 @@ None of the following are gaps in the design — they're places where the right 
 
 **Multi-user/multi-tenant support.** The brief's stated primary user is a single program owner; v1 is scoped to exactly that person. Multi-tenancy is a different set of ownership, isolation, and access-control problems that don't need solving until there's a second user to solve them for.
 
-**The Executor.** This is the big one, and it's deferred on purpose, not by oversight. AD-12 builds everything up to and including a computed `policy_decision` — and then stops. Nothing consumes that decision to actually perform an action against an external system. Building that consumer is exactly the kind of decision this whole document argues should never happen by default extrapolation from "well, AD-12 already exists" — it's a deliberate, separate architectural decision, requiring its own AD, made once there's a real reason to cross that line rather than because the plumbing up to it is now in place.
+**Building the Executor.** AD-13/14/15 now design it deliberately — the centralized `ledger_authorize_execution` gate, the operator-attested `approved` event, the `action_executions.log.md` idempotency model — but design is not code. Nothing here is implemented; the first real target, once built, is `create_ticket` against ServiceNow, chosen for its `low` impact and this project's already-proven read integration to mirror.
+
+**Autonomous/polled execution.** AD-13 rules this out explicitly, not by omission — every execution requires a deliberate human invocation naming one `proposal_id`, even an `automatic`-decision one. A scheduled/polled executor is a deliberate later step.
+
+**A `rejected` event, distinct from "not yet approved."** AD-14 designs `approved` for acceptance but doesn't resolve whether a human explicitly *declining* a proposal needs its own event, or whether that just looks identical to never having reviewed it. Revisit once a real approval workflow exists to design against.
 
 **`rezops.policy.yaml`'s exact per-action fields and `policy_decision`'s exact thresholds.** AD-12 fixes who evaluates policy and where the action vocabulary lives — not the exact numeric thresholds or which actions exist yet. Same deferral pattern as AD-5's confidence formula: implementation detail owned by the code once it's written.
 
 **`LedgerRecord.tier_sla` actually being computed.** AD-12's criticality signal leans on it, and it was already deferred under AD-9 before this amendment — a target with no `tier_sla` yet resolves to the most conservative tier rather than a guess, so AD-12 doesn't need this resolved to be safe, just to be more precise later.
+
+**The residual race window in `ledger_authorize_execution`'s idempotency check.** Appending the `attempted` marker at authorization time narrows, but doesn't provably close, the window between two concurrent invocations of the same proposal. Same root category as the project's long-standing no-file-locking deferral, named explicitly here rather than quietly inherited, given a double-executed write is a more visible failure than an interleaved log line.
 
 ## Reading this alongside the brief
 
@@ -199,4 +223,4 @@ Every brief commitment lands on a specific, named AD:
 
 None of these mappings were free — each is a direct answer to a specific sentence in the brief's Scope section. That traceability, every non-negotiable and every trust-layer requirement lands on a specific, named AD rather than getting handled by vague good intentions, is itself the strongest evidence that this architecture is built to do what the brief asked for, not just adjacent to it.
 
-AD-11 and AD-12 are the one exception worth flagging honestly: they don't map to anything in the original brief, because they postdate it — they're Olu's own later decision to extend the v1 scope, not a brief requirement being fulfilled. What they don't do is contradict the brief. Read-only-first, graceful degradation, and never-hide-uncertainty all still hold exactly as stated above; AD-11/AD-12 add a named, gated *door* for proposing a claim or an action, not a write path that bypasses any of the three.
+AD-11 through AD-15 are the exception worth flagging honestly: they don't map to anything in the original brief, because they postdate it — they're Olu's own later decision to extend the v1 scope, not a brief requirement being fulfilled. What they don't do is contradict the brief. Read-only-first, graceful degradation, and never-hide-uncertainty all still hold exactly as stated above; AD-11/AD-12 add a named, gated *door* for proposing a claim or an action; AD-13/14/15 design — but do not build — what would eventually walk through it, with its own centralized authorization gate, operator-attested approval, and no automatic rollback. Nothing here is a write path that bypasses any of the three original non-negotiables.
