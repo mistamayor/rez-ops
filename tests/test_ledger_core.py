@@ -362,19 +362,20 @@ def test_ledger_get_record_tool_matches_get_record(
     }
 
 
-# --- ledger_get_record tool: exceptions surface as structured errors -----
+# --- ledger_get_record tool: LogFormatError fails open, not a structured error
 
 
-def test_ledger_get_record_tool_returns_structured_error_on_log_format_error(
+def test_ledger_get_record_tool_returns_fail_open_record_on_log_format_error(
     ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A LogFormatError raised deep inside get_record must not escape as a
-    raw, unhandled exception -- the mcp SDK's own request-handling layer
-    (mcp.server.lowlevel.server.Server.call_tool's registered handler)
-    already catches any exception from a tool call and converts it into a
-    structured CallToolResult(isError=True, ...). This test proves that
-    behavior end-to-end for our tool rather than adding a redundant
-    try/except in ledger_core/server.py.
+    raw, unhandled exception -- and, since Story 16, get_record itself fails
+    open on a corrupted artifact-type log (AD-8), returning the same
+    empty-fields/unknown-confidence record it already returns for a
+    never-observed artifact_id. The tool call therefore succeeds
+    (isError is False) rather than surfacing a structured error -- this is a
+    deliberate reversal of the prior "propagate as a structured error"
+    behavior, confirmed with the user.
     """
     ledger_dir.mkdir(parents=True)
     (ledger_dir / "test_artifact.log.md").write_text(
@@ -384,12 +385,27 @@ def test_ledger_get_record_tool_returns_structured_error_on_log_format_error(
 
     result = asyncio.run(_call_ledger_get_record("test_artifact", "x1"))
 
-    assert result.isError is True
-    assert result.content
-    assert "unparseable event log line" in result.content[0].text
+    assert result.isError is False
+    expected = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    assert result.structuredContent == {
+        "artifact_type": expected.artifact_type,
+        "artifact_id": expected.artifact_id,
+        "fields": dict(expected.fields),
+        "last_verified": expected.last_verified,
+        "verification_method": expected.verification_method,
+        "expiry_rule": expected.expiry_rule,
+        "tier_sla": expected.tier_sla,
+        "escalation_owner": expected.escalation_owner,
+        "confidence": expected.confidence,
+    }
+    assert expected.fields == {}
+    assert expected.confidence == "unknown"
+    assert expected.last_verified is None
+    assert expected.escalation_owner is None
 
 
-# --- LogFormatError: malformed log lines raise instead of misparsing -----
+# --- LogFormatError: malformed log lines raise from read_events, but -----
+# --- get_record fails open around them (AD-8) -----------------------------
 
 
 def test_read_events_raises_log_format_error_for_unparseable_line(
@@ -403,10 +419,15 @@ def test_read_events_raises_log_format_error_for_unparseable_line(
     with pytest.raises(LogFormatError):
         read_events("test_artifact", ledger_dir=ledger_dir)
 
-    # get_record propagates the same error rather than silently swallowing
-    # or misinterpreting the malformed line.
-    with pytest.raises(LogFormatError):
-        get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    # get_record fails open around the same corrupted log rather than
+    # propagating LogFormatError -- treated exactly like "no facts recorded
+    # for this artifact_id" (AD-8; a deliberate reversal of the prior
+    # propagate-the-error behavior, confirmed with the user).
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    assert record.fields == {}
+    assert record.confidence == "unknown"
+    assert record.last_verified is None
+    assert record.escalation_owner is None
 
 
 def test_read_events_raises_log_format_error_for_invalid_fields_json(
@@ -422,8 +443,38 @@ def test_read_events_raises_log_format_error_for_invalid_fields_json(
     with pytest.raises(LogFormatError):
         read_events("test_artifact", ledger_dir=ledger_dir)
 
-    with pytest.raises(LogFormatError):
-        get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    record = get_record("test_artifact", "x1", ledger_dir=ledger_dir)
+    assert record.fields == {}
+    assert record.confidence == "unknown"
+    assert record.last_verified is None
+    assert record.escalation_owner is None
+
+
+def test_get_record_fails_open_on_corrupted_log(ledger_dir: Path) -> None:
+    """get_record's own AD-8 fail-open treatment of a corrupted artifact-type
+    log, mirroring `list_records`'s/`get_coverage_map`'s existing
+    corrupted-log tests in structure. Unlike those two -- which surface a
+    dedicated `LOG_FORMAT_ERROR_MARKER`/`LOG_FORMAT_ERROR_ARTIFACT_ID`
+    sentinel -- `get_record` reuses its own existing "never observed" empty
+    record verbatim: the corrupted log is indistinguishable here from
+    "nothing recorded yet" for the requested artifact_id, trading
+    distinguishability for consistency with the AD-8 bar those other two
+    reads already meet (per the user's explicit confirmation to reverse the
+    prior design choice).
+    """
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+
+    record = get_record("broken_type", "whatever", ledger_dir=ledger_dir)
+
+    assert record.artifact_type == "broken_type"
+    assert record.artifact_id == "whatever"
+    assert record.fields == {}
+    assert record.last_verified is None
+    assert record.escalation_owner is None
+    assert record.confidence == "unknown"
 
 
 # --- Additional review-finding coverage -----------------------------------
@@ -438,7 +489,14 @@ def test_read_events_raises_log_format_error_for_invalid_fields_json(
         ("artifact_type", ".."),
         ("artifact_id", "bad/id"),
         ("artifact_id", "has space"),
-        ("source", "bad/source"),
+        # "/" is deliberately *not* tested as invalid for `source` here --
+        # Story 16 widened `_SOURCE_RE` to allow "/" as a genuine
+        # segment-boundary separator (several connectors' `_build_source`
+        # now sanitize each identifier segment individually, then join the
+        # sanitized segments with a literal "/", which is guaranteed
+        # injective precisely because "/" can never survive inside an
+        # individually-sanitized segment). See
+        # test_rawfact_accepts_slash_in_source below.
         ("source", "has space"),
     ],
 )
@@ -454,6 +512,22 @@ def test_rawfact_rejects_invalid_charset_in_identifiers(
     kwargs[field_name] = bad_value
     with pytest.raises(SchemaValidationError):
         RawFact(**kwargs)
+
+
+def test_rawfact_accepts_slash_in_source() -> None:
+    """Story 16: `source` may legitimately contain "/" as a segment-boundary
+    separator (e.g. "servicenow:https:__dev_service-now_com/incident/abc123")
+    -- unlike `artifact_type`/`artifact_id`, which still reject "/" (it's
+    never used to build a filesystem path or log filename the way those two
+    are).
+    """
+    fact = RawFact(
+        artifact_type="test_artifact",
+        artifact_id="x1",
+        source="servicenow:instance/incident/abc123",
+        fields={},
+    )
+    assert fact.source == "servicenow:instance/incident/abc123"
 
 
 @pytest.mark.parametrize("bad_value", [{"nested": "dict"}, ["a", "list"], object()])

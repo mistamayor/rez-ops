@@ -159,6 +159,18 @@ def get_record(
     recorded facts at all. Never raises for a missing artifact; it simply
     returns an empty-fields, unknown record.
 
+    If the artifact-type's log fails to parse (`LogFormatError`), that
+    failure is treated exactly like "no facts recorded for this artifact_id"
+    -- the same empty-fields/`confidence="unknown"`/`last_verified=None`/
+    `escalation_owner=None` record `get_record` already returns for a
+    never-observed artifact_id -- rather than propagating the error (AD-8:
+    graceful degradation, the same treatment `get_coverage_map`/`list_records`
+    already give this same failure at their own granularity). A corrupted
+    log is therefore indistinguishable here from an artifact that was simply
+    never observed; callers wanting to detect the corruption itself should
+    use `list_records`/`get_coverage_map`, which surface it via a dedicated
+    sentinel/marker instead of silently absorbing it.
+
     `last_verified` is likewise computed exclusively here, from the latest
     folded-in event's own timestamp for this artifact_id -- `None` if no
     fact has ever been recorded for it. It reflects *append order* (the
@@ -178,9 +190,13 @@ def get_record(
     always `None` on every record this story produces -- no tiering data
     source exists yet.
     """
-    by_artifact, last_verified_by_artifact = _fold_events_by_artifact(
-        artifact_type, ledger_dir=ledger_dir
-    )
+    try:
+        by_artifact, last_verified_by_artifact = _fold_events_by_artifact(
+            artifact_type, ledger_dir=ledger_dir
+        )
+    except LogFormatError:
+        by_artifact, last_verified_by_artifact = {}, {}
+
     fields = by_artifact.get(artifact_id, {})
     last_verified = last_verified_by_artifact.get(artifact_id)
 

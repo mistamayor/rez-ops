@@ -53,11 +53,18 @@ mcp = FastMCP("sharepoint")
 #: charset (`^[A-Za-z0-9_:-]+$` -- see shared/ledger_schema/models.py,
 #: read-only for this story) that excludes "/" and other characters a
 #: `drive_id`/`item_id` could in principle contain. Mirroring the other
-#: connectors' `_build_source`, the whole constructed
-#: "sharepoint:<drive_id>/<item_id>" string is swept for any character
-#: outside this charset and each is replaced with "_" -- producing an
-#: opaque, human-readable provenance string, not a structured, parseable
-#: one.
+#: connectors' `_build_source`, `drive_id` and `item_id` are each sanitized
+#: *individually* against this charset, then the two sanitized segments are
+#: joined with a literal "/" -- never sanitizing the whole joined string in
+#: one pass. Because "/" is itself outside this charset, it can never
+#: survive inside an individually-sanitized segment, so the "/" added by the
+#: join is always unambiguous: two distinct (drive_id, item_id) pairs can
+#: never collapse onto the same `source` string just because one pair's
+#: internal "/" happened to line up with the other's segment boundary. The
+#: result is still not a structured, parseable value in general (each
+#: segment's own sanitization is still lossy) -- only its charset-validity
+#: and human-readability are load bearing -- but the segment boundary
+#: itself is now injective.
 _SOURCE_UNSAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9_:-]")
 
 #: Wall-clock budget for each HTTP request to Microsoft Graph. A hung
@@ -111,8 +118,9 @@ class InvalidArtifactIdentifierError(SharePointConnectorError, ValueError):
 
 class MissingCredentialsError(SharePointConnectorError):
     """Raised when `REZOPS_SHAREPOINT_TOKEN` is unset, empty/whitespace-only,
-    or contains a control character (e.g. an embedded CR/LF) that would be
-    unsafe to place in an HTTP header.
+    contains a control character (e.g. an embedded CR/LF), or contains a
+    non-ASCII character -- any of which would be unsafe to place in an HTTP
+    header.
 
     Always raised before any HTTP request is attempted.
     """
@@ -151,7 +159,10 @@ def _read_credential() -> str:
     """Read and validate the bearer token from the env.
 
     Raises `MissingCredentialsError` -- before any HTTP request is attempted
-    -- if the var is unset or empty/whitespace-only.
+    -- if the var is unset or empty/whitespace-only, contains a control
+    character, or contains a non-ASCII character. The returned token is
+    stripped of incidental leading/trailing whitespace -- never sent to
+    Microsoft Graph padded.
     """
     token = os.environ.get(_TOKEN_ENV_VAR)
     if not token or not token.strip():
@@ -161,12 +172,17 @@ def _read_credential() -> str:
             f"{_TOKEN_ENV_VAR} contains a control character and cannot be "
             "used in an HTTP header"
         )
-    return token
+    if not token.isascii():
+        raise MissingCredentialsError(
+            f"{_TOKEN_ENV_VAR} must contain only ASCII characters"
+        )
+    return token.strip()
 
 
 def _build_source(drive_id: str, item_id: str) -> str:
-    raw_source = f"sharepoint:{drive_id}/{item_id}"
-    return _SOURCE_UNSAFE_CHARS_RE.sub("_", raw_source)
+    safe_drive_id = _SOURCE_UNSAFE_CHARS_RE.sub("_", drive_id)
+    safe_item_id = _SOURCE_UNSAFE_CHARS_RE.sub("_", item_id)
+    return f"sharepoint:{safe_drive_id}/{safe_item_id}"
 
 
 def _build_client() -> httpx.Client:
@@ -369,7 +385,8 @@ def sharepoint_get_document_status(
     non-string `drive_id`/`item_id`, `InvalidArtifactIdentifierError` for
     empty/whitespace-only/non-string `artifact_type`/`artifact_id`,
     `MissingCredentialsError` when `REZOPS_SHAREPOINT_TOKEN` is unset, blank,
-    or contains a control character, `DocumentNotFoundError` on HTTP 404,
+    or contains a control character or a non-ASCII character,
+    `DocumentNotFoundError` on HTTP 404,
     `AuthenticationError` on HTTP 401/403, `MalformedResponseError` for a 200
     body missing `lastModifiedDateTime` (a `null` value counts as missing),
     that isn't valid JSON, that isn't an object, or whose

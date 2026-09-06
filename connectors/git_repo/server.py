@@ -33,16 +33,18 @@ _FIELD_SEP = "\x1f"
 #: `shared.ledger_schema.RawFact.source` is validated against a strict
 #: charset (`^[A-Za-z0-9_:-]+$` -- see shared/ledger_schema/models.py,
 #: read-only for this story) that excludes both "/" and "@". A repo's
-#: filesystem path legitimately contains "/", and the "git:<repo_path>@<sha>"
-#: shape from the spec's I/O matrix introduces a literal "@" -- so the whole
-#: constructed string is swept for any character outside this charset, not
-#: just the `repo_path` substring, and each such character (including the
-#: "@" separator itself) is replaced with "_". Because "/" and "@" both
-#: collapse to the same "_" replacement, the result is NOT a structured,
-#: parseable "git:<path>...<sha>" value -- it is an opaque, human-readable
-#: provenance string. Nothing in this codebase parses `source` back into its
-#: parts today; only its charset-validity and human-readability are load
-#: bearing.
+#: filesystem path legitimately contains "/". `_build_source` sanitizes
+#: `repo_path` and `commit_sha` *individually* against this charset, then
+#: joins the two sanitized segments with a literal "/" -- never sanitizing
+#: the whole joined string in one pass. Because "/" is itself outside this
+#: charset, it can never survive inside an individually-sanitized segment,
+#: so the "/" added by the join is always unambiguous: two distinct
+#: (repo_path, commit_sha) pairs can never collapse onto the same `source`
+#: string just because one pair's internal "/" happened to line up with the
+#: other's segment boundary. The result is still not a structured,
+#: parseable value in general (each segment's own sanitization is still
+#: lossy) -- only its charset-validity and human-readability are load
+#: bearing -- but the segment boundary itself is now injective.
 _SOURCE_UNSAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9_:-]")
 
 #: Wall-clock budget for each `git` subprocess call. A hung git process
@@ -189,8 +191,9 @@ def _last_touched(repo_path: str, file_path: str) -> tuple[str, str, str]:
 
 def _build_source(repo_path: str, commit_sha: str) -> str:
     resolved_repo = str(Path(repo_path).resolve())
-    raw_source = f"git:{resolved_repo}@{commit_sha}"
-    return _SOURCE_UNSAFE_CHARS_RE.sub("_", raw_source)
+    safe_repo = _SOURCE_UNSAFE_CHARS_RE.sub("_", resolved_repo)
+    safe_sha = _SOURCE_UNSAFE_CHARS_RE.sub("_", commit_sha)
+    return f"git:{safe_repo}/{safe_sha}"
 
 
 @mcp.tool(name="git_get_last_touched")

@@ -26,6 +26,7 @@ from connectors.google_drive.server import (
     InvalidFileIdentifierError,
     MalformedResponseError,
     MissingCredentialsError,
+    _build_source,
     google_drive_get_document_status,
     mcp,
 )
@@ -356,6 +357,89 @@ def test_control_character_in_credential_raises_before_any_http_request(
         )
 
     spy.assert_not_called()
+
+
+def test_token_with_incidental_whitespace_is_stripped_before_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token env var set with incidental leading/trailing whitespace must
+    be sent to Google Drive stripped -- not padded verbatim.
+    """
+    monkeypatch.setenv("REZOPS_DRIVE_TOKEN", f"  {_TOKEN}  ")
+    file = _realistic_file()
+    captured_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(200, json=file)
+
+    monkeypatch.setattr(
+        "connectors.google_drive.server._build_client", lambda: _mock_client(handler)
+    )
+
+    google_drive_get_document_status(
+        file_id="file123", artifact_type="test_artifact", artifact_id="x1"
+    )
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0].headers["authorization"] == f"Bearer {_TOKEN}"
+
+
+def test_non_ascii_token_raises_before_any_http_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-ASCII credential (e.g. an accented character or emoji) must be
+    rejected before any HTTP request is attempted, the same way a control
+    character already is.
+    """
+    monkeypatch.setenv("REZOPS_DRIVE_TOKEN", "s3cr3t-téken")
+
+    spy = Mock(side_effect=AssertionError("HTTP client should never be constructed"))
+    monkeypatch.setattr("connectors.google_drive.server._build_client", spy)
+
+    with pytest.raises(MissingCredentialsError):
+        google_drive_get_document_status(
+            file_id="file123", artifact_type="test_artifact", artifact_id="x1"
+        )
+
+    spy.assert_not_called()
+
+
+def test_token_with_trailing_control_char_raises_before_any_http_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A control character sitting at the edge of the token (e.g. a trailing
+    CRLF) must still be rejected -- stripping incidental whitespace must
+    never silently clean it away before the control-character check runs.
+    """
+    monkeypatch.setenv("REZOPS_DRIVE_TOKEN", "secret\r\n")
+
+    spy = Mock(side_effect=AssertionError("HTTP client should never be constructed"))
+    monkeypatch.setattr("connectors.google_drive.server._build_client", spy)
+
+    with pytest.raises(MissingCredentialsError):
+        google_drive_get_document_status(
+            file_id="file123", artifact_type="test_artifact", artifact_id="x1"
+        )
+
+    spy.assert_not_called()
+
+
+# --- Story 16: _build_source has no join-collision risk (single identifier) -
+
+
+def test_build_source_distinct_file_ids_produce_distinct_sources() -> None:
+    """Unlike the multi-identifier connectors, `_build_source(file_id)` takes
+    a single identifier -- there is no join to make injective. This
+    regression test simply confirms the per-connector `_build_source`
+    hardening pass left this single-segment case's behavior unaffected: two
+    ordinary, distinct `file_id`s still produce two distinct `source`
+    strings.
+    """
+    source_one = _build_source("file123")
+    source_two = _build_source("file456")
+
+    assert source_one != source_two
 
 
 # --- I/O matrix row 6: file not found ----------------------------------------

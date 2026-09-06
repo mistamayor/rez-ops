@@ -18,13 +18,14 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ## Status
 
-All 15 planned stories shipped, 657 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
+All 16 planned stories shipped, 682 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
 
 **Built:**
 - Shared `RawFact`/`LedgerRecord` schema and append-only ledger core (confidence, coverage, live queries)
 - Six Sensors: git (local, no credentials needed), ServiceNow ticketing, Google Calendar, ServiceNow CMDB, Google Drive, SharePoint (Microsoft Graph)
 - Ownership inference/arbitration and orphan-risk detection, draft-not-send outbound content, a periodic briefing aggregating what needs a decision today, and `.mcp.json` + `ops/run_scheduled_briefing.py` for OS-scheduled headless operation with explicit failure logging
 - Evidence-backed claims (`EvidenceBundle`) and policy-gated action proposals (`ActionProposal`) — a later extension beyond the original 11 stories; see User Guide steps 8–9
+- Cross-cutting hardening (Story 16): unambiguous per-connector provenance strings, stripped/ASCII-validated credentials, and graceful degradation on a corrupted ledger log
 
 **Not yet done:** registering an actual cron/launchd job on any machine — `ops/README.md` documents how, but nothing installs one automatically. An Executor that actually performs a policy-approved `ActionProposal` against an external system doesn't exist — a separate, later, deliberate decision, not a default extrapolation from `ActionProposal` existing. Known gaps and accepted risks are tracked in [`_bmad-output/implementation-artifacts/deferred-work.md`](_bmad-output/implementation-artifacts/deferred-work.md).
 
@@ -38,7 +39,7 @@ All 15 planned stories shipped, 657 tests passing. See [`_bmad-output/specs/spec
 
 ```bash
 uv sync
-uv run pytest -v      # 657 tests, all mocked/local — no live credentials needed to run the suite
+uv run pytest -v      # 682 tests, all mocked/local — no live credentials needed to run the suite
 ```
 
 This is enough to develop and test Rez Ops. To actually *use* it against real systems, continue to the User Guide.

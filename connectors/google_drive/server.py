@@ -105,9 +105,10 @@ class InvalidArtifactIdentifierError(GoogleDriveConnectorError, ValueError):
 
 
 class MissingCredentialsError(GoogleDriveConnectorError):
-    """Raised when `REZOPS_DRIVE_TOKEN` is unset, empty/whitespace-only, or
-    contains a control character (e.g. an embedded CR/LF) that would be
-    unsafe to place in an HTTP header.
+    """Raised when `REZOPS_DRIVE_TOKEN` is unset, empty/whitespace-only,
+    contains a control character (e.g. an embedded CR/LF), or contains a
+    non-ASCII character -- any of which would be unsafe to place in an HTTP
+    header.
 
     Always raised before any HTTP request is attempted.
     """
@@ -146,7 +147,10 @@ def _read_credential() -> str:
     """Read and validate the bearer token from the env.
 
     Raises `MissingCredentialsError` -- before any HTTP request is attempted
-    -- if the var is unset or empty/whitespace-only.
+    -- if the var is unset or empty/whitespace-only, contains a control
+    character, or contains a non-ASCII character. The returned token is
+    stripped of incidental leading/trailing whitespace -- never sent to
+    Google Drive padded.
     """
     token = os.environ.get(_TOKEN_ENV_VAR)
     if not token or not token.strip():
@@ -156,12 +160,16 @@ def _read_credential() -> str:
             f"{_TOKEN_ENV_VAR} contains a control character and cannot be "
             "used in an HTTP header"
         )
-    return token
+    if not token.isascii():
+        raise MissingCredentialsError(
+            f"{_TOKEN_ENV_VAR} must contain only ASCII characters"
+        )
+    return token.strip()
 
 
 def _build_source(file_id: str) -> str:
-    raw_source = f"google-drive:{file_id}"
-    return _SOURCE_UNSAFE_CHARS_RE.sub("_", raw_source)
+    safe_file_id = _SOURCE_UNSAFE_CHARS_RE.sub("_", file_id)
+    return f"google-drive:{safe_file_id}"
 
 
 def _build_client() -> httpx.Client:
@@ -341,7 +349,8 @@ def google_drive_get_document_status(
     non-string `file_id`, `InvalidArtifactIdentifierError` for empty/
     whitespace-only/non-string `artifact_type`/`artifact_id`,
     `MissingCredentialsError` when `REZOPS_DRIVE_TOKEN` is unset, blank, or
-    contains a control character, `DocumentNotFoundError` on HTTP 404,
+    contains a control character or a non-ASCII character,
+    `DocumentNotFoundError` on HTTP 404,
     `AuthenticationError` on HTTP 401/403, `MalformedResponseError` for a 200
     body missing `modifiedTime` (a `null` value counts as missing), that
     isn't valid JSON, that isn't an object, or whose

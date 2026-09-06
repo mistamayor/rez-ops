@@ -208,3 +208,40 @@
     HTTPS-only validation, redaction on every error branch). Independent
     credentials from every other connector, even one already targeting a
     Microsoft-adjacent system.
+- id: "16"
+  title: "Cross-cutting connector and ledger-core hardening"
+  description: >-
+    Fix the four converged, well-evidenced gaps accumulated in
+    deferred-work.md across Stories 1-15's reviews: a non-injective
+    `_build_source` collision (6 connectors), an unstripped credential
+    (5 connectors), a non-ASCII-credential UnicodeEncodeError risk (5
+    connectors), and `get_record`'s missing fail-open on a corrupted log
+    (ledger_core). No new capability -- hardens CAP-1/CAP-2/CAP-3's
+    existing implementations. ~35 lower-priority deferred items
+    explicitly left as-is per user direction.
+  spec_checkpoint: true
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Four independent fixes, each cited by >=2 converged findings across
+    prior stories' reviews. (1) `_build_source`: sanitize each identifier
+    segment individually before joining with "/", not the whole
+    concatenated string at once -- since "/" is itself in the sanitized-
+    away charset, joining post-sanitization guarantees the separator can
+    never appear inside a segment, making the join injective. Applies to
+    git_repo, ticketing, calendar_google, cmdb, google_drive, sharepoint.
+    (2) `_read_credential`/`_read_credentials`: strip the token before
+    returning it (every other value in these modules is already
+    `.strip()`ped) and reject a non-ASCII credential the same way a
+    control character is already rejected (typed error, before any HTTP
+    request) -- ticketing, calendar_google, cmdb, google_drive,
+    sharepoint. (3) `ledger_core.projection.get_record`: catch
+    `LogFormatError` around its `_fold_events_by_artifact` call and
+    degrade to the same empty-fields/unknown-confidence record it already
+    returns for a never-observed artifact -- extending its own documented
+    "never raises for a missing artifact" invariant to also cover a
+    corrupted log, consistent with `list_records`/`get_coverage_map`'s
+    existing AD-8 treatment of the identical failure. Once `get_record`
+    itself never raises `LogFormatError`, remove the now-redundant
+    try/except around its call site in
+    `action_proposals.create_action_proposal` (simplification only, no
+    behavior change).

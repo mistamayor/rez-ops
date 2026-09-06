@@ -26,6 +26,7 @@ from connectors.sharepoint.server import (
     MalformedResponseError,
     MissingCredentialsError,
     SharePointConnectorError,
+    _build_source,
     mcp,
     sharepoint_get_document_status,
 )
@@ -41,8 +42,9 @@ _SOURCE_UNSAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9_:-]")
 
 
 def _expected_source(drive_id: str, item_id: str) -> str:
-    raw = f"sharepoint:{drive_id}/{item_id}"
-    return _SOURCE_UNSAFE_CHARS_RE.sub("_", raw)
+    safe_drive_id = _SOURCE_UNSAFE_CHARS_RE.sub("_", drive_id)
+    safe_item_id = _SOURCE_UNSAFE_CHARS_RE.sub("_", item_id)
+    return f"sharepoint:{safe_drive_id}/{safe_item_id}"
 
 
 def _realistic_item(**overrides: Any) -> dict[str, Any]:
@@ -452,6 +454,87 @@ def test_control_character_in_credential_raises_before_any_http_request(
         )
 
     spy.assert_not_called()
+
+
+def test_token_with_incidental_whitespace_is_stripped_before_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token env var set with incidental leading/trailing whitespace must
+    be sent to Microsoft Graph stripped -- not padded verbatim.
+    """
+    monkeypatch.setenv("REZOPS_SHAREPOINT_TOKEN", f"  {_TOKEN}  ")
+    item = _realistic_item()
+    captured_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(200, json=item)
+
+    monkeypatch.setattr(
+        "connectors.sharepoint.server._build_client", lambda: _mock_client(handler)
+    )
+
+    sharepoint_get_document_status(
+        drive_id="drive123", item_id="item123", artifact_type="test_artifact", artifact_id="x1"
+    )
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0].headers["authorization"] == f"Bearer {_TOKEN}"
+
+
+def test_non_ascii_token_raises_before_any_http_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-ASCII credential (e.g. an accented character or emoji) must be
+    rejected before any HTTP request is attempted, the same way a control
+    character already is.
+    """
+    monkeypatch.setenv("REZOPS_SHAREPOINT_TOKEN", "s3cr3t-téken")
+
+    spy = Mock(side_effect=AssertionError("HTTP client should never be constructed"))
+    monkeypatch.setattr("connectors.sharepoint.server._build_client", spy)
+
+    with pytest.raises(MissingCredentialsError):
+        sharepoint_get_document_status(
+            drive_id="drive123", item_id="item123", artifact_type="test_artifact", artifact_id="x1"
+        )
+
+    spy.assert_not_called()
+
+
+def test_token_with_trailing_control_char_raises_before_any_http_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A control character sitting at the edge of the token (e.g. a trailing
+    CRLF) must still be rejected -- stripping incidental whitespace must
+    never silently clean it away before the control-character check runs.
+    """
+    monkeypatch.setenv("REZOPS_SHAREPOINT_TOKEN", "secret\r\n")
+
+    spy = Mock(side_effect=AssertionError("HTTP client should never be constructed"))
+    monkeypatch.setattr("connectors.sharepoint.server._build_client", spy)
+
+    with pytest.raises(MissingCredentialsError):
+        sharepoint_get_document_status(
+            drive_id="drive123", item_id="item123", artifact_type="test_artifact", artifact_id="x1"
+        )
+
+    spy.assert_not_called()
+
+
+# --- Story 16: _build_source per-segment sanitization is injective --------
+
+
+def test_build_source_does_not_collide_for_slash_containing_segments() -> None:
+    """Two distinct (drive_id, item_id) pairs that collide under the old
+    join-then-sanitize-the-whole-string scheme must produce two different
+    `source` strings now that each segment is sanitized individually before
+    being joined with a literal `/`.
+    """
+    source_one = _build_source("a/b", "c")
+    source_two = _build_source("a", "b/c")
+
+    assert source_one != source_two
 
 
 # --- I/O matrix row 7: item not found ----------------------------------------

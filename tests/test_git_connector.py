@@ -24,6 +24,7 @@ from connectors.git_repo.server import (
     InvalidPathError,
     NoGitHistoryError,
     NotAGitRepositoryError,
+    _build_source,
     git_get_last_touched,
     mcp,
 )
@@ -36,8 +37,9 @@ _SOURCE_UNSAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9_:-]")
 
 
 def _expected_source(repo_path: Path, commit_sha: str) -> str:
-    raw = f"git:{repo_path.resolve()}@{commit_sha}"
-    return _SOURCE_UNSAFE_CHARS_RE.sub("_", raw)
+    safe_repo = _SOURCE_UNSAFE_CHARS_RE.sub("_", str(repo_path.resolve()))
+    safe_sha = _SOURCE_UNSAFE_CHARS_RE.sub("_", commit_sha)
+    return f"git:{safe_repo}/{safe_sha}"
 
 
 def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -369,3 +371,20 @@ def test_git_get_last_touched_tool_returns_structured_error_for_escaping_path(
     assert result.isError is True
     assert result.content
     assert "resolves outside" in result.content[0].text
+
+
+# --- Story 16: _build_source per-segment sanitization is injective --------
+
+
+def test_build_source_does_not_collide_for_slash_containing_segments() -> None:
+    """Two distinct (repo_path, commit_sha) pairs that collide under the old
+    join-then-sanitize-the-whole-string scheme (both pairs' `/` characters
+    getting swept into `_` regardless of which segment they originally
+    belonged to) must produce two different `source` strings now that each
+    segment is sanitized individually before being joined with a literal
+    `/`.
+    """
+    source_one = _build_source("a/b", "c")
+    source_two = _build_source("a", "b/c")
+
+    assert source_one != source_two

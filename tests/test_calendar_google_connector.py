@@ -26,6 +26,7 @@ from connectors.calendar_google.server import (
     InvalidEventIdentifierError,
     MalformedResponseError,
     MissingCredentialsError,
+    _build_source,
     calendar_get_event_status,
     mcp,
 )
@@ -41,8 +42,9 @@ _SOURCE_UNSAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9_:-]")
 
 
 def _expected_source(calendar_id: str, event_id: str) -> str:
-    raw = f"google-calendar:{calendar_id}/{event_id}"
-    return _SOURCE_UNSAFE_CHARS_RE.sub("_", raw)
+    safe_calendar_id = _SOURCE_UNSAFE_CHARS_RE.sub("_", calendar_id)
+    safe_event_id = _SOURCE_UNSAFE_CHARS_RE.sub("_", event_id)
+    return f"google-calendar:{safe_calendar_id}/{safe_event_id}"
 
 
 def _realistic_timed_event(**overrides: Any) -> dict[str, Any]:
@@ -325,6 +327,87 @@ def test_control_character_in_credential_raises_before_any_http_request(
         )
 
     spy.assert_not_called()
+
+
+def test_token_with_incidental_whitespace_is_stripped_before_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token env var set with incidental leading/trailing whitespace must
+    be sent to Google Calendar stripped -- not padded verbatim.
+    """
+    monkeypatch.setenv("REZOPS_CALENDAR_TOKEN", f"  {_TOKEN}  ")
+    event = _realistic_timed_event()
+    captured_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(200, json=event)
+
+    monkeypatch.setattr(
+        "connectors.calendar_google.server._build_client", lambda: _mock_client(handler)
+    )
+
+    calendar_get_event_status(
+        calendar_id="primary", event_id="evt123", artifact_type="test_artifact", artifact_id="x1"
+    )
+
+    assert len(captured_requests) == 1
+    assert captured_requests[0].headers["authorization"] == f"Bearer {_TOKEN}"
+
+
+def test_non_ascii_token_raises_before_any_http_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-ASCII credential (e.g. an accented character or emoji) must be
+    rejected before any HTTP request is attempted, the same way a control
+    character already is.
+    """
+    monkeypatch.setenv("REZOPS_CALENDAR_TOKEN", "s3cr3t-téken")
+
+    spy = Mock(side_effect=AssertionError("HTTP client should never be constructed"))
+    monkeypatch.setattr("connectors.calendar_google.server._build_client", spy)
+
+    with pytest.raises(MissingCredentialsError):
+        calendar_get_event_status(
+            calendar_id="primary", event_id="evt123", artifact_type="test_artifact", artifact_id="x1"
+        )
+
+    spy.assert_not_called()
+
+
+def test_token_with_trailing_control_char_raises_before_any_http_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A control character sitting at the edge of the token (e.g. a trailing
+    CRLF) must still be rejected -- stripping incidental whitespace must
+    never silently clean it away before the control-character check runs.
+    """
+    monkeypatch.setenv("REZOPS_CALENDAR_TOKEN", "secret\r\n")
+
+    spy = Mock(side_effect=AssertionError("HTTP client should never be constructed"))
+    monkeypatch.setattr("connectors.calendar_google.server._build_client", spy)
+
+    with pytest.raises(MissingCredentialsError):
+        calendar_get_event_status(
+            calendar_id="primary", event_id="evt123", artifact_type="test_artifact", artifact_id="x1"
+        )
+
+    spy.assert_not_called()
+
+
+# --- Story 16: _build_source per-segment sanitization is injective --------
+
+
+def test_build_source_does_not_collide_for_slash_containing_segments() -> None:
+    """Two distinct (calendar_id, event_id) pairs that collide under the old
+    join-then-sanitize-the-whole-string scheme must produce two different
+    `source` strings now that each segment is sanitized individually before
+    being joined with a literal `/`.
+    """
+    source_one = _build_source("a/b", "c")
+    source_two = _build_source("a", "b/c")
+
+    assert source_one != source_two
 
 
 # --- I/O matrix row 7: network/timeout failure ------------------------------

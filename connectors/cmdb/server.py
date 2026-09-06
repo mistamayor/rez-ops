@@ -52,10 +52,18 @@ mcp = FastMCP("cmdb")
 #: read-only for this story) that excludes "/", ".", and other characters a
 #: ServiceNow instance URL legitimately contains (e.g. "https://dev123.
 #: service-now.com"). Mirroring the ticketing connector's `_build_source`,
-#: the whole constructed "servicenow:<instance>/<table>/<sys_id>" string is
-#: swept for any character outside this charset and each is replaced with
-#: "_" -- producing an opaque, human-readable provenance string, not a
-#: structured, parseable one.
+#: `instance_url`, `table`, and `sys_id` are each sanitized *individually*
+#: against this charset, then the three sanitized segments are joined with a
+#: literal "/" -- never sanitizing the whole joined string in one pass.
+#: Because "/" is itself outside this charset, it can never survive inside
+#: an individually-sanitized segment, so the "/"s added by the join are
+#: always unambiguous: two distinct (instance_url, table, sys_id) triples
+#: can never collapse onto the same `source` string just because one
+#: triple's internal "/" happened to line up with another's segment
+#: boundary. The result is still not a structured, parseable value in
+#: general (each segment's own sanitization is still lossy) -- only its
+#: charset-validity and human-readability are load bearing -- but the
+#: segment boundaries themselves are now injective.
 _SOURCE_UNSAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9_:-]")
 
 #: Wall-clock budget for each HTTP request to ServiceNow. A hung connection
@@ -152,8 +160,8 @@ class InvalidArtifactIdentifierError(CMDBConnectorError, ValueError):
 
 class MissingCredentialsError(CMDBConnectorError):
     """Raised when `REZOPS_CMDB_INSTANCE_URL` or `REZOPS_CMDB_TOKEN` is unset,
-    empty/whitespace-only, or (for the token) contains a control character
-    that would be unsafe to place in an HTTP header.
+    empty/whitespace-only, or (for the token) contains a control character or
+    a non-ASCII character that would be unsafe to place in an HTTP header.
 
     Always raised before any HTTP request is attempted.
     """
@@ -242,7 +250,9 @@ def _read_credentials() -> tuple[str, str]:
 
     Raises `MissingCredentialsError` -- before any HTTP request is attempted
     -- if either var is unset or empty/whitespace-only, or if the token
-    contains a control character.
+    contains a control character or a non-ASCII character. The returned
+    token is stripped of incidental leading/trailing whitespace -- never
+    sent to ServiceNow padded.
     """
     instance_url = os.environ.get(_INSTANCE_URL_ENV_VAR)
     token = os.environ.get(_TOKEN_ENV_VAR)
@@ -267,13 +277,19 @@ def _read_credentials() -> tuple[str, str]:
             f"{_TOKEN_ENV_VAR} contains a control character and cannot be "
             "used in an HTTP header"
         )
+    if not token.isascii():
+        raise MissingCredentialsError(
+            f"{_TOKEN_ENV_VAR} must contain only ASCII characters"
+        )
 
-    return instance_url, token
+    return instance_url, token.strip()
 
 
 def _build_source(instance_url: str, table: str, sys_id: str) -> str:
-    raw_source = f"servicenow:{instance_url}/{table}/{sys_id}"
-    return _SOURCE_UNSAFE_CHARS_RE.sub("_", raw_source)
+    safe_instance = _SOURCE_UNSAFE_CHARS_RE.sub("_", instance_url)
+    safe_table = _SOURCE_UNSAFE_CHARS_RE.sub("_", table)
+    safe_sys_id = _SOURCE_UNSAFE_CHARS_RE.sub("_", sys_id)
+    return f"servicenow:{safe_instance}/{safe_table}/{safe_sys_id}"
 
 
 def _build_client() -> httpx.Client:
@@ -442,7 +458,8 @@ def cmdb_get_ci_status(
     non-string `table`/`sys_id`, `InvalidArtifactIdentifierError` for empty/
     whitespace-only/non-string `artifact_type`/`artifact_id`,
     `MissingCredentialsError` when either env var is unset/blank or the
-    token contains a control character, `InvalidInstanceUrlError` when the
+    token contains a control character or a non-ASCII character,
+    `InvalidInstanceUrlError` when the
     instance URL is blank or not `https://`, `CINotFoundError` on HTTP 404,
     `AuthenticationError` on HTTP 401/403, `MalformedResponseError` for a 200
     body missing expected fields (a `null` value for a required field counts

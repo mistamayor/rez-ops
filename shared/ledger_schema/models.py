@@ -50,9 +50,22 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 #: Charset for `source`. Slightly wider than `_IDENTIFIER_RE` because
 #: provenance references conventionally look like "connector:id" (e.g.
-#: "synthetic:test", "jira:PROJ-123") -- but still rejects slashes,
-#: whitespace, and whitespace-only strings for the same reasons as above.
-_SOURCE_RE = re.compile(r"^[A-Za-z0-9_:-]+$")
+#: "synthetic:test", "jira:PROJ-123") -- still rejects whitespace and
+#: whitespace-only strings for the same reasons as `_IDENTIFIER_RE` (source
+#: flows unescaped into a whitespace-delimited log line, `ledger_core.log`'s
+#: `_LINE_RE`/`_format_event`). Unlike `_IDENTIFIER_RE`, "/" *is* allowed
+#: here (Story 16): several connectors build `source` from more than one
+#: identifier segment, each sanitized individually against this same charset
+#: before being joined with a literal "/" -- since every connector's own
+#: per-segment sanitization already strips "/" out of each segment's
+#: content, a "/" that survives into the final `source` value can only ever
+#: be a genuine segment-boundary separator added after sanitization, never
+#: smuggled segment content, so allowing it here introduces no ambiguity.
+#: `source` is never used to build a filesystem path or a log filename
+#: (unlike `artifact_type`/`artifact_id`, where `_IDENTIFIER_RE` excludes
+#: "/" for exactly that reason) -- it is a whitespace-delimited log-line
+#: field and an opaque provenance string everywhere else it's read.
+_SOURCE_RE = re.compile(r"^[A-Za-z0-9_:/-]+$")
 
 #: JSON-primitive scalar types a RawFact.fields value may hold. Restricting
 #: to these (rather than allowing arbitrary nested list/dict values) closes
@@ -76,7 +89,7 @@ def _validate_source(owner: str, value: str) -> None:
     if not _SOURCE_RE.match(value):
         raise SchemaValidationError(
             f"{owner}.source must be a non-empty string matching "
-            f"{_SOURCE_RE.pattern!r} (no slashes or whitespace); got {value!r}"
+            f"{_SOURCE_RE.pattern!r} (no whitespace); got {value!r}"
         )
 
 
