@@ -13,9 +13,15 @@ satisfied by construction -- this *is* that same read path, just composed,
 never a parallel reimplementation).
 
 Section order on `Briefing` is fixed -- `orphan_risk`, `unknown_confidence`,
-`pending_drafts`, `data_quality_issues` -- not a computed priority ranking:
-there's no tier/SLA data yet to rank by (see ARCHITECTURE-SPINE.md's
-Deferred section), so this doesn't pretend to have one.
+`pending_drafts`, `data_quality_issues` -- not a computed priority ranking.
+Tier/SLA/risk data now genuinely varies with real data (Story 17, CAP-11:
+`LedgerRecord.tier_sla`/`risk` are computed from `rezops.tiers.yaml`), but
+this story still deliberately doesn't rank sections -- or reorder records
+within a section -- by it: ranking is a real design decision (e.g. does
+`risk="high"` outrank an orphan-risk record with no risk data at all?) that
+deserves its own deliberate pass rather than being folded in here as a side
+effect. Tier-based briefing ranking is a natural next step once that
+question is actually worked through, not implemented in this story.
 
 Read-only: `get_briefing` never appends to a log, never writes a draft, and
 never touches `ledger_dir` if it doesn't already exist -- it only calls

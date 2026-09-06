@@ -78,6 +78,7 @@ def _record_to_dict(record: LedgerRecord) -> dict[str, Any]:
         "tier_sla": record.tier_sla,
         "escalation_owner": record.escalation_owner,
         "confidence": record.confidence,
+        "risk": record.risk,
     }
 
 
@@ -150,8 +151,11 @@ def ledger_get_record(artifact_type: str, artifact_id: str) -> dict[str, Any]:
     Computed by purely replaying that artifact type's append-only event log
     (AD-3) -- never a cached or hand-edited value. An artifact with no
     recorded facts returns empty fields and confidence "unknown" rather than
-    an error. `verification_method`, `expiry_rule`, and `tier_sla` are
-    intentionally always `None` in this story -- nothing populates them yet.
+    an error. `tier_sla`/`expiry_rule`/`risk` are computed from
+    `rezops.tiers.yaml`'s declared tier x this artifact's freshness x
+    confidence (Story 17, CAP-11) -- `None`/`None`/`"unknown"` for an
+    artifact with no declared tier. `verification_method` is intentionally
+    always `None` -- no verification-method data source exists yet.
     `escalation_owner` is computed from a fixed field-priority order over
     `support_group` (CMDB) > `assigned_to` (ticketing) > `organizer_email`
     (calendar) -- `None` if none of those three fields carries a non-blank
@@ -244,9 +248,10 @@ def ledger_list_records(
     failure (AD-8), returned regardless of any `confidence` or `orphan_risk`
     filter. Returns an empty list rather than raising for a nonexistent,
     empty-string, or reserved (`_`-prefixed) `artifact_type`, or when no
-    record matches the given filters. `verification_method`, `expiry_rule`,
-    and `tier_sla` are intentionally always `None` in this story -- nothing
-    populates them yet.
+    record matches the given filters. `tier_sla`/`expiry_rule`/`risk` are
+    computed per record from `rezops.tiers.yaml` (Story 17, CAP-11), exactly
+    like `ledger_get_record`'s. `verification_method` is intentionally
+    always `None` -- no verification-method data source exists yet.
     """
     records = list_records(
         artifact_type=artifact_type, confidence=confidence, orphan_risk=orphan_risk

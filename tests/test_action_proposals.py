@@ -182,7 +182,7 @@ def test_perfect_confidence_low_impact_known_criticality_is_automatic(
 
     # tier_sla is never populated by any real story yet (AD-9) -- simulate a
     # future world where it is, by patching the name this module looks up.
-    def fake_get_record(artifact_type, artifact_id, *, ledger_dir=None):
+    def fake_get_record(artifact_type, artifact_id, *, ledger_dir=None, tiers_path=None):
         return LedgerRecord(
             artifact_type=artifact_type,
             artifact_id=artifact_id,
@@ -235,7 +235,7 @@ def test_high_impact_action_never_automatic_even_with_perfect_confidence(
 ) -> None:
     _seed_evidence_bundle(ledger_dir, "ev1", 1.0)
 
-    def fake_get_record(artifact_type, artifact_id, *, ledger_dir=None):
+    def fake_get_record(artifact_type, artifact_id, *, ledger_dir=None, tiers_path=None):
         return LedgerRecord(
             artifact_type=artifact_type, artifact_id=artifact_id, tier_sla="tier-1"
         )

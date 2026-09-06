@@ -24,6 +24,7 @@ LEDGER_ONLY_FIELDS = frozenset(
         "tier_sla",
         "escalation_owner",
         "confidence",
+        "risk",
     }
 )
 
@@ -31,6 +32,12 @@ LEDGER_ONLY_FIELDS = frozenset(
 #: confidence-scoring formula is implemented yet -- "unknown" is the only
 #: value this story ever produces.
 CONFIDENCE_VALUES = frozenset({"agent-verified", "manual", "unknown"})
+
+#: The only DR risk classifications ledger-core may report (Story 17,
+#: CAP-11), computed exclusively by `ledger_core.projection` from a
+#: declared tier x freshness x confidence -- never accepted as
+#: connector/caller input, same constraint class as `CONFIDENCE_VALUES`.
+RISK_VALUES = frozenset({"high", "medium", "low", "unknown"})
 
 
 class SchemaValidationError(ValueError):
@@ -159,6 +166,7 @@ class LedgerRecord:
     tier_sla: str | None = None
     escalation_owner: str | None = None
     confidence: str = "unknown"
+    risk: str = "unknown"
 
     def __post_init__(self) -> None:
         _validate_identifier("LedgerRecord", "artifact_type", self.artifact_type)
@@ -167,5 +175,10 @@ class LedgerRecord:
             raise SchemaValidationError(
                 f"LedgerRecord.confidence must be one of {sorted(CONFIDENCE_VALUES)!r}, "
                 f"got {self.confidence!r}"
+            )
+        if self.risk not in RISK_VALUES:
+            raise SchemaValidationError(
+                f"LedgerRecord.risk must be one of {sorted(RISK_VALUES)!r}, "
+                f"got {self.risk!r}"
             )
         object.__setattr__(self, "fields", _freeze_fields(self.fields))

@@ -36,6 +36,14 @@ _LINE_RE = re.compile(
 #: event type into projected state as if it were a plain RawFact.
 RAWFACT_EVENT_TYPE = "rawfact"
 
+#: The exact timestamp format every event log line's timestamp is rendered
+#: in (see `_format_event` below). Exposed so other modules that need to
+#: parse a log-produced timestamp back into a `datetime` (e.g.
+#: `ledger_core.projection`'s risk/freshness computation) import this
+#: constant instead of duplicating the literal, which would otherwise be a
+#: silent future-drift risk if the two ever diverged.
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
 
 class LogFormatError(ValueError):
     """Raised when an event log line cannot be parsed."""
@@ -58,7 +66,7 @@ def _log_path(artifact_type: str, ledger_dir: Path) -> Path:
 
 
 def _format_event(fact: RawFact, timestamp: datetime) -> str:
-    ts = timestamp.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = timestamp.astimezone(timezone.utc).strftime(TIMESTAMP_FORMAT)
     fields_json = json.dumps(dict(fact.fields), sort_keys=True)
     return (
         f"- ({RAWFACT_EVENT_TYPE}) {ts} source={fact.source} "

@@ -221,3 +221,15 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/16-cross-cutting-connector-and-ledger-core-hardening.md`
   summary: `cmdb`/`ticketing`'s `instance_url` env var is validated (non-blank, `https://`-prefixed, trailing-`/`-stripped) but never `.strip()`ped of general leading/trailing whitespace the way the token now is -- a trailing newline on `REZOPS_CMDB_INSTANCE_URL`/`REZOPS_TICKETING_INSTANCE_URL` (a common artifact of some secret-store tooling) still hard-fails with `InvalidInstanceUrlError`.
   evidence: Surfaced by Story 16's blind-hunter review as an inconsistency highlighted by contrast with the token now being stripped. Pre-existing since these connectors were built (Stories 5/7), not introduced by Story 16 -- out of this story's frozen scope (token stripping only).
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/17-tier-assignment-dr-risk-classification.md`
+  summary: `LedgerRecord.risk` (Story 17, CAP-11) is computed but never consulted by `action_proposals._compute_policy_decision` -- `policy_decision` still only reads `impact`/`tier_sla_known`/`min_confidence`, not the risk level itself.
+  evidence: Confirmed by Story 17's blind-hunter reviewer. `_compute_policy_decision` is Story 13's frozen policy rule (AD-12) -- out of Story 17's own "no other change to action_proposals.py" scope. A real future integration question (should a HIGH-risk target ever downgrade an otherwise-automatic decision?), not a defect in what Story 17 built.
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/17-tier-assignment-dr-risk-classification.md`
+  summary: Naming collision between `list_records`' pre-existing `orphan_risk: bool` filter (escalation-ownership gap) and the new `LedgerRecord.risk: str` field (DR expiry classification) -- no docstring disambiguates the two for an MCP-tool-schema reader.
+  evidence: Surfaced by Story 17's blind-hunter review. Doc-only; both concepts already work correctly, just share the word "risk" for unrelated things.
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/17-tier-assignment-dr-risk-classification.md`
+  summary: `expiry_rule = f"{expiry_days} days"` is unconditionally pluralized -- a tier declared with `expiry_days: 1` renders `"1 days"`.
+  evidence: Surfaced by Story 17's blind-hunter review. Cosmetic, untested, no functional impact.
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/17-tier-assignment-dr-risk-classification.md`
+  summary: `rezops.tiers.yaml`'s hand-rolled parser has an asymmetric tier-name charset: `_TIER_DECLARATION_RE` restricts to `[A-Za-z0-9_-]+` but `_TIER_ASSIGNMENT_RE` captures the assigned tier name with an unrestricted `\S+`. Currently harmless (the undeclared-tier check catches anything not already declared under the stricter pattern), but an inconsistency that could bite if that check is ever refactored.
+  evidence: Surfaced by Story 17's blind-hunter review.

@@ -3,6 +3,7 @@
 from shared.ledger_schema.models import (
     CONFIDENCE_VALUES,
     LEDGER_ONLY_FIELDS,
+    RISK_VALUES,
     LedgerRecord,
     RawFact,
     SchemaValidationError,
@@ -11,6 +12,7 @@ from shared.ledger_schema.models import (
 __all__ = [
     "CONFIDENCE_VALUES",
     "LEDGER_ONLY_FIELDS",
+    "RISK_VALUES",
     "LedgerRecord",
     "RawFact",
     "SchemaValidationError",

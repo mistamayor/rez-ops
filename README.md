@@ -18,7 +18,7 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ## Status
 
-All 16 planned stories shipped, 682 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
+17 of 19 planned stories shipped, 710 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
 
 **Built:**
 - Shared `RawFact`/`LedgerRecord` schema and append-only ledger core (confidence, coverage, live queries)
@@ -39,7 +39,7 @@ All 16 planned stories shipped, 682 tests passing. See [`_bmad-output/specs/spec
 
 ```bash
 uv sync
-uv run pytest -v      # 682 tests, all mocked/local — no live credentials needed to run the suite
+uv run pytest -v      # 710 tests, all mocked/local — no live credentials needed to run the suite
 ```
 
 This is enough to develop and test Rez Ops. To actually *use* it against real systems, continue to the User Guide.
