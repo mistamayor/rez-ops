@@ -66,6 +66,10 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
   - **intent:** For a DR test result, compute how well the test actually performed against its declared target — RTO/RPO achieved as a percentage of target, not bare pass/fail — and whether it ran inside the program's mandated annual testing window, an independent compliance signal regardless of pass/fail.
   - **success:** A DR test result artifact carrying target and actual recovery-time fields gets computed RTO-achieved and RPO-achieved percentages; a test scheduled outside the config-declared testing window is flagged even if it later passes; both values are ledger-core-computed, never accepted as connector/caller input.
 
+- **CAP-13 — Executive dashboard generation**
+  - **intent:** Generate a self-contained, static HTML snapshot of current DR readiness (KPI tiles + RAG status per tier) from real ledger state via a regenerate-on-demand script — no hosted server, no new computation, a human-facing view of what CAP-4/CAP-11's existing query surface already returns.
+  - **success:** Running the generation script produces a valid HTML file whose displayed KPI/RAG values exactly match what the underlying query functions return at the same point in time — the same "must match a live query" criterion CAP-7 already established; any view without a real backing data source is visibly labeled as not-yet-wired, never populated with fabricated numbers presented as real.
+
 ## Constraints
 
 - No connector may write to any external system of record in v1 (read-only-first).
@@ -75,6 +79,7 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
 - Ledger state is mutated only through an append-only log; no in-place edits — single writer, auditable history.
 - v1 favors fewer, high-trust, provenance-ranked sources over broad source coverage.
 - Voice may propose a claim or an action; it never computes the derived value that evaluates it — `EvidenceBundle.confidence`, `ActionProposal.policy_decision`, and CAP-11/CAP-12's `tier_sla`/`expiry_rule`/risk level/RTO-RPO-achieved values are all ledger-core-exclusive, the same discipline as CAP-3's confidence computation extended to the proposal and risk-classification layers.
+- A generated dashboard view without a real backing data source must be visibly labeled as such, never populated with fabricated numbers presented as real — extends the same never-hide-uncertainty discipline to the presentation layer (CAP-13).
 
 *Full mechanism for each of these lives in `ARCHITECTURE-SPINE.md` (AD-1 through AD-12).*
 
@@ -90,6 +95,7 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
 - Packaging as an installable product for other practitioners — left open, not decided for v1.
 - Migrating to MCP SDK v2 in v1.
 - Automatic tier discovery: an artifact's tier is declared in a git-tracked config file, never inferred from a CMDB field, a connector, or any live system.
+- A live, auto-refreshing, or hosted dashboard: CAP-13 generates a static snapshot only, regenerated on demand by rerunning the script; a persistent server process is a separate, later, deliberate decision, not a default extrapolation from this capability existing.
 
 ## Success signal
 
