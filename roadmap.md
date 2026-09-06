@@ -10,7 +10,7 @@ This is the human-facing narrative. The machine contract — capabilities, const
 
 ## Now — Shipped
 
-19 stories, 802 tests. The Sensors → Ledger → Voice paradigm, end to end:
+20 stories, 820 tests. The Sensors → Ledger → Voice paradigm, end to end:
 
 - 🟢 **Freshness Ledger core** — append-only event log, pure projection, explicit confidence (`agent-verified` / `manual` / `unknown`) on every derived value.
 - 🟢 **Six Sensors** (read-only, metadata only) — git, ServiceNow ticketing, Google Calendar, ServiceNow CMDB, Google Drive, SharePoint (Microsoft Graph).
@@ -22,11 +22,11 @@ This is the human-facing narrative. The machine contract — capabilities, const
 - 🟢 **Cross-cutting hardening** — unambiguous per-connector provenance strings, stripped/validated credentials, graceful degradation on a corrupted ledger log.
 - 🟢 **DR risk classification (rules engine)** — `tier_sla`/expiry rules populated from a new config-declared tier vocabulary, a risk level (high/medium/low/unknown) computed from tier × freshness × confidence, RTO/RPO achieved as a percentage of target, and an annual testing-window compliance check (wraparound-aware). This is what finally makes the policy engine's `automatic` branch reachable against real data.
 - 🟢 **DR readiness summary query** — one new read-only MCP tool, `ledger_get_dr_readiness_summary`, rolling up risk per declared tier (no hardcoded axis list — however many tiers exist in config).
+- 🟢 **Executive dashboard, phase 1** — `ops/generate_dashboard.py` regenerates a static HTML snapshot (no hosted server; stays inside the local-first constraint) from real ledger state: six KPI tiles and a RAG status panel, both genuinely wired to `get_dr_readiness_summary`/`list_records`/`list_drafts`/`get_coverage_map`. Dependency Map, "Ask Rez Ops", and the Upcoming/Recent Tests views keep the validated prototype's layout but are honestly labeled "not yet wired to real data" rather than showing fabricated numbers.
 
 ## Next
 
-- 🟡 **Executive dashboard, phase 1** — a regenerate-on-demand static HTML snapshot (no hosted server; stays inside the local-first constraint) rendering KPI tiles, RAG status, upcoming/recent tests, and a dependency map. Look and feel validated in a live prototype (warm-neutral palette, a single accent color, confidence expressed as a dot-fill everywhere a number claims to be known) — not yet wired to real ledger data via a generation script.
-- 🟡 **Evidence investigation panel ("Ask Rez Ops")** — a UI expression of the already-built `EvidenceBundle`: a cited, confidence-scored answer to a plain-language question, with explicit next actions (draft a message, propose an action) that stay inside the existing never-auto-act discipline — never a one-click "accept." Validated in the same prototype; not yet backed by a real query.
+- 🟡 **Evidence investigation panel ("Ask Rez Ops")** — a UI expression of the already-built `EvidenceBundle`: a cited, confidence-scored answer to a plain-language question, with explicit next actions (draft a message, propose an action) that stay inside the existing never-auto-act discipline — never a one-click "accept." Validated in the prototype; not yet backed by a real query.
 - 🟡 **Dependency mapping (first cut)** — a generic `depends_on` edge on the existing artifact substrate, not the full typed domain model below; most likely sourced by extending the existing CMDB connector to also fetch ServiceNow's CI relationship data. Rendering validated in the prototype (a real, interactive graph); the data side — an actual `depends_on` relationship and a connector to populate it — isn't built yet.
 
 ## Later — pending a dedicated architecture session

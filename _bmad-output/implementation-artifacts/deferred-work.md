@@ -251,3 +251,18 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/19-dr-test-achievement-signals.md`
   summary: `_achieved_pct`'s `target / actual` true-division could in principle raise `OverflowError` for an astronomically large `int` pair.
   evidence: Surfaced by Story 19's edge-case-hunter review. No realistic trigger with real recovery-time data (minutes, not googol-scale integers) -- same category as other already-accepted "no defensive check, no realistic trigger" gaps in this project.
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/20-executive-dashboard-generator.md`
+  summary: `ops/generate_dashboard.py`'s default `ledger_dir`/`tiers_path`/`output_path` are relative paths resolved against the process's current working directory, not anchored to the repo root -- a scheduled/cron invocation with a different cwd would silently read/write the wrong location.
+  evidence: Surfaced by Story 20's blind-hunter review. Confirmed to match every existing `ledger_core` function's identical convention (`DEFAULT_LEDGER_DATA_DIR`, `DEFAULT_TIERS_PATH` are both bare relative paths) -- a project-wide, pre-existing assumption (run from the repo root) that this story inherits, not a new regression.
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/20-executive-dashboard-generator.md`
+  summary: `_render_rag_panel`'s risk-breakdown string and the "Tiers At Risk" KPI both hardcode the four known risk levels/statuses (high/medium/low/unknown) -- if `dr_readiness` ever introduces a new one, its counts are silently dropped rather than surfaced.
+  evidence: Surfaced independently by Story 20's blind-hunter and edge-case-hunter reviews (converged). No realistic trigger today -- risk/status values are a closed enum already validated in `LedgerRecord.__post_init__`; a 5th value would require a deliberate, coordinated schema change first.
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/20-executive-dashboard-generator.md`
+  summary: The generated dashboard loads Newsreader/Public Sans from `fonts.googleapis.com`/`fonts.gstatic.com` at view time -- an external dependency for a page billed as a local, offline-capable, no-hosted-server tool. Degrades gracefully to the declared system-font fallback with no network, but this is undocumented and untested.
+  evidence: Surfaced by Story 20's blind-hunter review. Inherited from the validated Claude Artifact prototype (which requires Google Fonts CDN per the Artifact tool's own CSP); worth reconsidering (embed a font, or drop custom fonts) in a future pass given this project's local-first constraint, not a functional break today.
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/20-executive-dashboard-generator.md`
+  summary: The dashboard's tab UI has no accessibility semantics -- no `role="tablist"`/`role="tab"`/`role="tabpanel"`, no `aria-selected`/`aria-controls`, no keyboard arrow-key navigation between tabs.
+  evidence: Surfaced by Story 20's blind-hunter review. Real future improvement for a dashboard meant for regular human use, not required for this story's v1 scope (wiring real data, not accessibility polish).
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/20-executive-dashboard-generator.md`
+  summary: No test covers a `tiers_path` that exists but is unreadable (permission-denied) or a `ledger_dir` that exists as a non-directory (e.g. a plain file at that path).
+  evidence: Surfaced by Story 20's blind-hunter review. OS-permission-based tests are platform-fragile to write portably; low realistic risk for a local single-user tool, same category as other already-deferred defensive-check gaps in this project.

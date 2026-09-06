@@ -18,7 +18,7 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ## Status
 
-All 19 planned stories shipped, 802 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
+All 20 planned stories shipped, 820 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
 
 **Built:**
 - Shared `RawFact`/`LedgerRecord` schema and append-only ledger core (confidence, coverage, live queries)
@@ -39,7 +39,7 @@ All 19 planned stories shipped, 802 tests passing. See [`_bmad-output/specs/spec
 
 ```bash
 uv sync
-uv run pytest -v      # 802 tests, all mocked/local — no live credentials needed to run the suite
+uv run pytest -v      # 820 tests, all mocked/local — no live credentials needed to run the suite
 ```
 
 This is enough to develop and test Rez Ops. To actually *use* it against real systems, continue to the User Guide.
@@ -171,6 +171,8 @@ calls `ledger_create_action_proposal`. `action` must be one of the names declare
 ### 10. Running it unattended
 
 `ops/run_scheduled_briefing.py` invokes `claude -p --mcp-config .mcp.json --output-format json` non-interactively and logs any failure (never fails silently) to `ledger_data/_ops.log.md`. Full setup, including sample crontab/launchd snippets, is in [`ops/README.md`](ops/README.md) — registering an actual scheduled job is a manual step nothing in this repo does for you.
+
+`ops/generate_dashboard.py` (`uv run python -m ops.generate_dashboard`) generates a static, read-only executive dashboard snapshot at `ledger_data/dashboard.html` by default — see [`ops/README.md`](ops/README.md) for details.
 
 ---
 

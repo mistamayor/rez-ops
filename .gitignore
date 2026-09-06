@@ -11,3 +11,4 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+ledger_data/dashboard.html
