@@ -58,6 +58,14 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
   - **intent:** Let Voice propose a system-state-changing action — naming it from a config-declared vocabulary, citing at least one `EvidenceBundle` — and have ledger-core alone compute whether it's automatic, requires human approval, or is denied, without any component executing it.
   - **success:** Every `ActionProposal`'s `policy_decision` is computed by ledger-core from config-declared action risk, target criticality, and the minimum confidence across cited evidence — never asserted by the caller; naming an undeclared action or citing no evidence is rejected before anything is recorded; no code path in v1 consumes an approved/automatic decision to perform the action against any external system.
 
+- **CAP-11 — Tiered DR risk classification**
+  - **intent:** Compute each artifact's DR risk level from its config-declared tier, current freshness against that tier's expiry rule, and its confidence — closing the gap where `tier_sla`/`expiry_rule`/`verification_method` have existed in the schema since CAP-1 but no story has ever populated them.
+  - **success:** An artifact whose type has a declared tier gets a computed `tier_sla`, `expiry_rule`, and risk level (high/medium/low); an artifact with no declared tier resolves to the most conservative reading (risk unknown), never a guess; every value is ledger-core-computed, never accepted as connector/caller input.
+
+- **CAP-12 — DR test achievement signals**
+  - **intent:** For a DR test result, compute how well the test actually performed against its declared target — RTO/RPO achieved as a percentage of target, not bare pass/fail — and whether it ran inside the program's mandated annual testing window, an independent compliance signal regardless of pass/fail.
+  - **success:** A DR test result artifact carrying target and actual recovery-time fields gets computed RTO-achieved and RPO-achieved percentages; a test scheduled outside the config-declared testing window is flagged even if it later passes; both values are ledger-core-computed, never accepted as connector/caller input.
+
 ## Constraints
 
 - No connector may write to any external system of record in v1 (read-only-first).
@@ -66,7 +74,7 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
 - v1 runs local-first: no hosted database, container orchestration, or persistent server process; git is the sole persistence layer.
 - Ledger state is mutated only through an append-only log; no in-place edits — single writer, auditable history.
 - v1 favors fewer, high-trust, provenance-ranked sources over broad source coverage.
-- Voice may propose a claim or an action; it never computes the derived value that evaluates it — `EvidenceBundle.confidence` and `ActionProposal.policy_decision` are ledger-core-exclusive, the same discipline as CAP-3's confidence computation extended to the proposal layer.
+- Voice may propose a claim or an action; it never computes the derived value that evaluates it — `EvidenceBundle.confidence`, `ActionProposal.policy_decision`, and CAP-11/CAP-12's `tier_sla`/`expiry_rule`/risk level/RTO-RPO-achieved values are all ledger-core-exclusive, the same discipline as CAP-3's confidence computation extended to the proposal and risk-classification layers.
 
 *Full mechanism for each of these lives in `ARCHITECTURE-SPINE.md` (AD-1 through AD-12).*
 
@@ -81,10 +89,11 @@ A pain to solve, for DR/resilience program owners at large, always-on organizati
 - Multi-user or multi-tenant support.
 - Packaging as an installable product for other practitioners — left open, not decided for v1.
 - Migrating to MCP SDK v2 in v1.
+- Automatic tier discovery: an artifact's tier is declared in a git-tracked config file, never inferred from a CMDB field, a connector, or any live system.
 
 ## Success signal
 
-Zero "we didn't know that was stale" surprises at the next audit or review; "who owns X" answered in seconds via a live query instead of days of chasing; a generated briefing consistently surfaces genuinely new information rather than repeating already-handled items; and every proposed action shows its evidence trail and policy decision before any human is asked to approve it — never a bare recommendation with no attributable reasoning.
+Zero "we didn't know that was stale" surprises at the next audit or review; "who owns X" answered in seconds via a live query instead of days of chasing; a generated briefing consistently surfaces genuinely new information rather than repeating already-handled items; every proposed action shows its evidence trail and policy decision before any human is asked to approve it — never a bare recommendation with no attributable reasoning; and every computed risk level or RTO/RPO-achieved percentage traces to a declared tier and an observed freshness/confidence/test-result value — never a bare label with no derivation.
 
 ## Assumptions
 
