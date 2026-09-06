@@ -25,6 +25,9 @@ LEDGER_ONLY_FIELDS = frozenset(
         "escalation_owner",
         "confidence",
         "risk",
+        "rto_achieved_pct",
+        "rpo_achieved_pct",
+        "testing_window_compliance",
     }
 )
 
@@ -38,6 +41,15 @@ CONFIDENCE_VALUES = frozenset({"agent-verified", "manual", "unknown"})
 #: declared tier x freshness x confidence -- never accepted as
 #: connector/caller input, same constraint class as `CONFIDENCE_VALUES`.
 RISK_VALUES = frozenset({"high", "medium", "low", "unknown"})
+
+#: The only DR test testing-window compliance states ledger-core may report
+#: (Story 19, CAP-12), computed exclusively by `ledger_core.projection` from
+#: a declared annual window (`rezops.testing_window.yaml`) x an observed
+#: `test_date` -- never accepted as connector/caller input, same constraint
+#: class as `CONFIDENCE_VALUES`/`RISK_VALUES`.
+TESTING_WINDOW_COMPLIANCE_VALUES = frozenset(
+    {"compliant", "non_compliant", "unknown"}
+)
 
 
 class SchemaValidationError(ValueError):
@@ -167,6 +179,9 @@ class LedgerRecord:
     escalation_owner: str | None = None
     confidence: str = "unknown"
     risk: str = "unknown"
+    rto_achieved_pct: float | None = None
+    rpo_achieved_pct: float | None = None
+    testing_window_compliance: str = "unknown"
 
     def __post_init__(self) -> None:
         _validate_identifier("LedgerRecord", "artifact_type", self.artifact_type)
@@ -180,5 +195,21 @@ class LedgerRecord:
             raise SchemaValidationError(
                 f"LedgerRecord.risk must be one of {sorted(RISK_VALUES)!r}, "
                 f"got {self.risk!r}"
+            )
+        if self.testing_window_compliance not in TESTING_WINDOW_COMPLIANCE_VALUES:
+            raise SchemaValidationError(
+                "LedgerRecord.testing_window_compliance must be one of "
+                f"{sorted(TESTING_WINDOW_COMPLIANCE_VALUES)!r}, "
+                f"got {self.testing_window_compliance!r}"
+            )
+        if self.rto_achieved_pct is not None and not (0 <= self.rto_achieved_pct <= 100):
+            raise SchemaValidationError(
+                "LedgerRecord.rto_achieved_pct must be between 0 and 100 (or "
+                f"None), got {self.rto_achieved_pct!r}"
+            )
+        if self.rpo_achieved_pct is not None and not (0 <= self.rpo_achieved_pct <= 100):
+            raise SchemaValidationError(
+                "LedgerRecord.rpo_achieved_pct must be between 0 and 100 (or "
+                f"None), got {self.rpo_achieved_pct!r}"
             )
         object.__setattr__(self, "fields", _freeze_fields(self.fields))

@@ -18,7 +18,7 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ## Status
 
-18 of 19 planned stories shipped, 723 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
+All 19 planned stories shipped, 802 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
 
 **Built:**
 - Shared `RawFact`/`LedgerRecord` schema and append-only ledger core (confidence, coverage, live queries)
@@ -39,7 +39,7 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ```bash
 uv sync
-uv run pytest -v      # 723 tests, all mocked/local — no live credentials needed to run the suite
+uv run pytest -v      # 802 tests, all mocked/local — no live credentials needed to run the suite
 ```
 
 This is enough to develop and test Rez Ops. To actually *use* it against real systems, continue to the User Guide.
@@ -92,6 +92,7 @@ Claude Code detects `.mcp.json` automatically and (on first use) will prompt you
 - **RawFact vs. LedgerRecord** — a connector tool returns a *RawFact*: one observed fact from one source system, with no confidence or ownership attached (AD-9). Calling `ledger_ingest_raw_fact` records that fact into the ledger's append-only log. A *LedgerRecord* (what you get back from `ledger_get_record`/`ledger_list_records`) is ledger-core's computed view over every fact ever ingested for that artifact — confidence, escalation owner, and orphan-risk status are all derived, never something you set directly.
 - **Confidence is never hidden** — every record's `confidence` is one of `agent-verified`, `manual`, or `unknown`. There's no "assume it's fine" state; if nothing has ever ingested a fact for an artifact, it's `unknown`, visibly.
 - **Escalation owner & orphan-risk** — ledger-core picks one owner per artifact from whichever of these fields is present, in priority order: CMDB's `support_group` > ticketing's `assigned_to` > calendar's `organizer_email`. An artifact with facts but none of those three fields is *orphan-risk* — known to exist, but nobody's on the hook for it.
+- **DR test achievement & testing-window compliance** — if an artifact carries `rto_target_minutes`/`rto_actual_minutes` (and/or the `rpo_*` pair), `ledger_get_record`/`ledger_list_records` report `rto_achieved_pct`/`rpo_achieved_pct` — a computed percentage capped at 100, `None` if the pair is missing/invalid. If it carries a `test_date`, `testing_window_compliance` (`compliant`/`non_compliant`/`unknown`) is computed against the annual window declared in [`rezops.testing_window.yaml`](rezops.testing_window.yaml). All three are ledger-core-computed, never something you set directly.
 - **`EvidenceBundle`** — a citable, evidence-backed claim: `claim` + `reasoning` (your text) plus `evidence` (a list of citations, each naming one artifact and either a fact's `source` or a `LedgerRecord` field). `confidence` is never something you set — ledger-core computes it as the fraction of citations that actually resolve against current ledger state.
 - **`ActionProposal` & `policy_decision`** — a proposed action (e.g. `create_ticket`), citing at least one `EvidenceBundle`. `impact` and `policy_decision` (`automatic`/`requires_approval`/`denied`) are both ledger-core-computed, never something you set. **Nothing executes a proposal** — `policy_decision` is recorded and returned, that's it. There is no Executor in this system.
 
@@ -192,6 +193,7 @@ ledger_data/             # Runtime state: append-only logs (git-committed, human
   action_proposals.log.md # ActionProposal proposed/decided events (append-only log, not per-artifact-type)
 .mcp.json                # Project-scoped registration of ledger-core + all six connector servers
 rezops.policy.yaml       # Fixed action vocabulary + declared impact for ActionProposal (git-tracked, inputs only)
+rezops.testing_window.yaml # Declared annual DR-test window (window_start/window_end, git-tracked, inputs only)
 _bmad-output/            # Planning artifacts, spec, architecture, per-story specs, deferred-work log
 ```
 

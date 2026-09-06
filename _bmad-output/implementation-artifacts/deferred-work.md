@@ -245,3 +245,9 @@
 - source_spec: `_bmad-output/specs/spec-rez-ops/stories/18-dr-readiness-summary-query.md`
   summary: Tier-naming convention inconsistency in `rezops.tiers.yaml`: `platinum`/`gold`/`silver` are single lowercase words, but the two tiers this story added, `infrastructure`/`data_centre`, mix in snake_case -- inconsistent for values now displayed side-by-side in the same `tiers` list.
   evidence: Surfaced by Story 18's blind-hunter review. Cosmetic, no functional impact.
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/19-dr-test-achievement-signals.md`
+  summary: `load_testing_window` (`ledger_core/projection.py`) has no defensive handling for `OSError` (permission-denied, a directory instead of a file, non-UTF-8 content, or the file vanishing after its own `exists()` check) -- an uncaught exception would crash `get_record`/`list_records` instead of raising the typed `TestingWindowFileError`.
+  evidence: Surfaced by Story 19's edge-case-hunter review. Confirmed to match `load_tiers`'s identical pre-existing gap (Story 17) -- not new to this story, same unfixed class of issue.
+- source_spec: `_bmad-output/specs/spec-rez-ops/stories/19-dr-test-achievement-signals.md`
+  summary: `_achieved_pct`'s `target / actual` true-division could in principle raise `OverflowError` for an astronomically large `int` pair.
+  evidence: Surfaced by Story 19's edge-case-hunter review. No realistic trigger with real recovery-time data (minutes, not googol-scale integers) -- same category as other already-accepted "no defensive check, no realistic trigger" gaps in this project.

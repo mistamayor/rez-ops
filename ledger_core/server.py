@@ -83,6 +83,9 @@ def _record_to_dict(record: LedgerRecord) -> dict[str, Any]:
         "escalation_owner": record.escalation_owner,
         "confidence": record.confidence,
         "risk": record.risk,
+        "rto_achieved_pct": record.rto_achieved_pct,
+        "rpo_achieved_pct": record.rpo_achieved_pct,
+        "testing_window_compliance": record.testing_window_compliance,
     }
 
 

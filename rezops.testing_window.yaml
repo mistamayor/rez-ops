@@ -1,0 +1,21 @@
+# rezops.testing_window.yaml -- Story 19 (CAP-12): the program's mandated
+# annual DR testing window.
+#
+# Input only -- ledger-core (ledger_core/projection.py) is the sole computer
+# of what this declaration means for a given LedgerRecord's
+# testing_window_compliance. Kept separate from rezops.tiers.yaml/
+# rezops.policy.yaml (AD-2's one-responsibility-per-surface lesson applies to
+# config files too) -- this declares a calendar window, not a tier or an
+# action's risk.
+#
+# Exactly two lines, `window_start: MM-DD` and `window_end: MM-DD` (no year --
+# the window recurs every year). If window_end's month/day is earlier in the
+# calendar than window_start's, the window wraps across a year boundary.
+#
+# A test_date (from a RawFact's `test_date` field) whose (month, day) falls
+# inside this window resolves testing_window_compliance="compliant", else
+# "non_compliant". Missing this file, a missing/unparseable test_date, or
+# both, resolves "unknown" -- never a guess, never raises.
+
+window_start: 01-15
+window_end: 03-31

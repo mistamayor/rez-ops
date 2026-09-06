@@ -37,8 +37,12 @@ from ledger_core.log import LogFormatError, append_event, read_events
 from ledger_core.projection import (
     LOG_FORMAT_ERROR_ARTIFACT_ID,
     LOG_FORMAT_ERROR_MARKER,
+    TestingWindowFileError,
     TiersFileError,
+    _compute_test_achievement,
+    _compute_testing_window_compliance,
     _compute_tier_and_risk,
+    load_testing_window,
     load_tiers,
     get_coverage_map,
     get_record,
@@ -118,7 +122,17 @@ def test_conflicting_rawfacts_both_appended_nothing_overwritten(
 # --- I/O matrix row 3: RawFact attempts a LedgerRecord-only field ---------
 
 
-@pytest.mark.parametrize("forbidden_key", ["confidence", "tier_sla", "risk"])
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "confidence",
+        "tier_sla",
+        "risk",
+        "rto_achieved_pct",
+        "rpo_achieved_pct",
+        "testing_window_compliance",
+    ],
+)
 def test_rawfact_rejects_ledger_record_only_field(
     ledger_dir: Path, forbidden_key: str
 ) -> None:
@@ -226,6 +240,28 @@ def test_ledger_record_rejects_invalid_risk_value() -> None:
         )
 
 
+def test_ledger_record_rejects_invalid_testing_window_compliance_value() -> None:
+    with pytest.raises(SchemaValidationError):
+        LedgerRecord(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            testing_window_compliance="probably",
+        )
+
+
+@pytest.mark.parametrize("field_name", ["rto_achieved_pct", "rpo_achieved_pct"])
+@pytest.mark.parametrize("bad_value", [150.0, -1.0])
+def test_ledger_record_rejects_out_of_range_achieved_pct_value(
+    field_name: str, bad_value: float
+) -> None:
+    with pytest.raises(SchemaValidationError):
+        LedgerRecord(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            **{field_name: bad_value},
+        )
+
+
 # --- Acceptance: MCP server exposes exactly one read tool -----------------
 
 
@@ -262,7 +298,10 @@ def test_server_exposes_exactly_twelve_tools_none_calling_an_external_send_api()
 
 
 def _point_server_at(
-    monkeypatch: pytest.MonkeyPatch, ledger_dir: Path, tiers_path: Path | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    ledger_dir: Path,
+    tiers_path: Path | None = None,
+    testing_window_path: Path | None = None,
 ) -> None:
     """Redirect every ledger_dir-touching name ledger_core.server binds to an
     isolated tmp ledger dir.
@@ -278,14 +317,26 @@ def _point_server_at(
     (Story 17, CAP-11) -- otherwise both fall back to their own default
     (the real, git-committed `rezops.tiers.yaml`), which is fine for any
     test that only asserts on a synthetic artifact_type/artifact_id no real
-    tier is ever assigned to.
+    tier is ever assigned to. `testing_window_path`, if given, is likewise
+    forwarded to `get_record`/`list_records` (Story 19, CAP-12) -- otherwise
+    both fall back to their own default (the real, git-committed
+    `rezops.testing_window.yaml`), which is fine for any test that never sets
+    a `test_date` field.
     """
+    # `tiers_kwargs` alone is reused by `get_dr_readiness_summary` below,
+    # which accepts a `tiers_path` but no `testing_window_path` (Story 19 is
+    # explicitly not wired into that aggregate view) -- so
+    # `testing_window_path` is only added to the wider `record_kwargs` used
+    # by `get_record`/`list_records`.
     tiers_kwargs = {"tiers_path": tiers_path} if tiers_path is not None else {}
+    record_kwargs = dict(tiers_kwargs)
+    if testing_window_path is not None:
+        record_kwargs["testing_window_path"] = testing_window_path
     monkeypatch.setattr(
         server_module,
         "get_record",
         lambda artifact_type, artifact_id: get_record(
-            artifact_type, artifact_id, ledger_dir=ledger_dir, **tiers_kwargs
+            artifact_type, artifact_id, ledger_dir=ledger_dir, **record_kwargs
         ),
     )
     monkeypatch.setattr(
@@ -306,7 +357,7 @@ def _point_server_at(
             confidence=confidence,
             orphan_risk=orphan_risk,
             ledger_dir=ledger_dir,
-            **tiers_kwargs,
+            **record_kwargs,
         ),
     )
     monkeypatch.setattr(
@@ -391,6 +442,9 @@ def test_ledger_get_record_tool_matches_get_record(
         "escalation_owner": expected.escalation_owner,
         "confidence": expected.confidence,
         "risk": expected.risk,
+        "rto_achieved_pct": expected.rto_achieved_pct,
+        "rpo_achieved_pct": expected.rpo_achieved_pct,
+        "testing_window_compliance": expected.testing_window_compliance,
     }
 
 
@@ -430,6 +484,9 @@ def test_ledger_get_record_tool_returns_fail_open_record_on_log_format_error(
         "escalation_owner": expected.escalation_owner,
         "confidence": expected.confidence,
         "risk": expected.risk,
+        "rto_achieved_pct": expected.rto_achieved_pct,
+        "rpo_achieved_pct": expected.rpo_achieved_pct,
+        "testing_window_compliance": expected.testing_window_compliance,
     }
     assert expected.fields == {}
     assert expected.confidence == "unknown"
@@ -1570,6 +1627,9 @@ def _expected_list_records_payload(records) -> list[dict]:
             "escalation_owner": record.escalation_owner,
             "confidence": record.confidence,
             "risk": record.risk,
+            "rto_achieved_pct": record.rto_achieved_pct,
+            "rpo_achieved_pct": record.rpo_achieved_pct,
+            "testing_window_compliance": record.testing_window_compliance,
         }
         for record in records
     ]
@@ -4598,3 +4658,788 @@ def test_ledger_get_dr_readiness_summary_tool_performs_no_write(
 
     assert result.isError is False
     assert not ledger_dir.exists()
+
+
+# --- Story 19 (CAP-12): DR test achievement signals -------------------------
+#
+# `rezops.testing_window.yaml` declares the annual testing window (Story 19's
+# own hand-rolled parser, mirroring `load_tiers`'s discipline). `get_record`/
+# `list_records` compute `rto_achieved_pct`/`rpo_achieved_pct` from whatever
+# rto/rpo target/actual fields are present on any artifact_type, and
+# `testing_window_compliance` from `test_date` x the declared window -- none
+# ever accepted as connector/caller input.
+
+
+def _write_testing_window_file(tmp_path: Path, content: str) -> Path:
+    path = tmp_path / "rezops.testing_window.yaml"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+# --- load_testing_window: parsing -------------------------------------------
+
+
+def test_load_testing_window_returns_none_when_file_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    assert load_testing_window(tmp_path / "does_not_exist.yaml") is None
+
+
+def test_load_testing_window_parses_start_and_end(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-15\nwindow_end: 03-31\n"
+    )
+    assert load_testing_window(window_path) == ((1, 15), (3, 31))
+
+
+def test_load_testing_window_order_independent(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_end: 03-31\nwindow_start: 01-15\n"
+    )
+    assert load_testing_window(window_path) == ((1, 15), (3, 31))
+
+
+def test_load_testing_window_ignores_blank_lines_and_comments(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path,
+        "# annual DR testing window\n\nwindow_start: 11-01\n\n"
+        "# wraps the year boundary\nwindow_end: 02-28\n",
+    )
+    assert load_testing_window(window_path) == ((11, 1), (2, 28))
+
+
+def test_load_testing_window_rejects_unparseable_line(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(tmp_path, "not a valid line at all\n")
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_load_testing_window_rejects_duplicate_declaration(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_start: 02-01\nwindow_end: 03-01\n"
+    )
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_load_testing_window_rejects_missing_window_end(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(tmp_path, "window_start: 01-01\n")
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_load_testing_window_rejects_missing_window_start(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(tmp_path, "window_end: 01-01\n")
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+@pytest.mark.parametrize("bad_date", ["13-01", "01-32", "00-15", "02-30"])
+def test_load_testing_window_rejects_invalid_month_or_day(
+    tmp_path: Path, bad_date: str
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, f"window_start: {bad_date}\nwindow_end: 03-31\n"
+    )
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_load_testing_window_rejects_february_29_leap_day(tmp_path: Path) -> None:
+    """`MM-DD` has no year, so a `02-29` declaration is always rejected --
+    there is no way to know whether the declaring year was a leap year, and
+    accepting it would make the window silently invalid three years out of
+    four.
+    """
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 02-29\n"
+    )
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "\n\n", "# annual DR testing window\n# nothing declared yet\n\n"],
+)
+def test_load_testing_window_raises_for_empty_or_comment_only_file(
+    tmp_path: Path, content: str
+) -> None:
+    """A `rezops.testing_window.yaml` that *exists* but declares neither
+    `window_start` nor `window_end` (empty, or comments/blank lines only) is
+    not exactly two valid `MM-DD` lines -- the same "malformed, fails
+    loudly" treatment as declaring only one of the two (see the
+    `rejects_missing_window_*` tests above), never silently equivalent to a
+    missing file. Only a file that doesn't exist at all resolves `None`.
+    """
+    window_path = _write_testing_window_file(tmp_path, content)
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_get_record_raises_testing_window_file_error_for_empty_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(tmp_path, "# no window declared\n")
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-02-14"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    with pytest.raises(TestingWindowFileError):
+        get_record(
+            "test_records",
+            "payments-checkout",
+            ledger_dir=ledger_dir,
+            testing_window_path=window_path,
+        )
+
+
+# --- I/O matrix row: recovered within target --------------------------------
+
+
+def test_compute_test_achievement_recovered_within_target_caps_at_100() -> None:
+    rto_pct, rpo_pct = _compute_test_achievement(
+        {"rto_target_minutes": 60, "rto_actual_minutes": 45}
+    )
+    assert rto_pct == 100.0
+    assert rpo_pct is None
+
+
+# --- I/O matrix row: recovered slower than target ---------------------------
+
+
+def test_compute_test_achievement_recovered_slower_than_target() -> None:
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": 70, "rto_actual_minutes": 100}
+    )
+    assert rto_pct == 70.0
+
+
+def test_compute_test_achievement_rpo_computed_independently_of_rto() -> None:
+    rto_pct, rpo_pct = _compute_test_achievement(
+        {
+            "rto_target_minutes": 70,
+            "rto_actual_minutes": 100,
+            "rpo_target_minutes": 30,
+            "rpo_actual_minutes": 20,
+        }
+    )
+    assert rto_pct == 70.0
+    assert rpo_pct == 100.0
+
+
+# --- I/O matrix row: missing actual/target field ----------------------------
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"rto_target_minutes": 60},
+        {"rto_actual_minutes": 45},
+        {},
+    ],
+)
+def test_compute_test_achievement_missing_pair_member_resolves_none(
+    fields: dict,
+) -> None:
+    rto_pct, rpo_pct = _compute_test_achievement(fields)
+    assert rto_pct is None
+    assert rpo_pct is None
+
+
+# --- I/O matrix row: non-numeric or non-positive target/actual -------------
+
+
+@pytest.mark.parametrize(
+    "actual",
+    [0, -5, "45", True, False, None],
+)
+def test_compute_test_achievement_non_numeric_or_non_positive_actual_resolves_none(
+    actual: object,
+) -> None:
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": 60, "rto_actual_minutes": actual}
+    )
+    assert rto_pct is None
+
+
+@pytest.mark.parametrize(
+    "target",
+    [0, -5, "60", True, False, None],
+)
+def test_compute_test_achievement_non_numeric_or_non_positive_target_resolves_none(
+    target: object,
+) -> None:
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": target, "rto_actual_minutes": 45}
+    )
+    assert rto_pct is None
+
+
+def test_compute_test_achievement_bool_true_target_and_actual_resolves_none() -> None:
+    """`bool` is an `int` subclass in Python -- `True`/`False` must still be
+    rejected explicitly, not accidentally accepted as `1`/`0`.
+    """
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": True, "rto_actual_minutes": True}
+    )
+    assert rto_pct is None
+
+
+def test_compute_test_achievement_float_values_accepted() -> None:
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": 60.0, "rto_actual_minutes": 45.5}
+    )
+    assert rto_pct == pytest.approx(min(100.0, (60.0 / 45.5) * 100))
+
+
+# --- I/O matrix row: non-finite target/actual -------------------------------
+
+
+@pytest.mark.parametrize(
+    "target,actual",
+    [
+        (float("inf"), float("inf")),
+        (float("inf"), 45),
+        (60, float("inf")),
+        (float("nan"), 45),
+        (60, float("nan")),
+        (float("nan"), float("nan")),
+    ],
+)
+def test_compute_test_achievement_non_finite_target_or_actual_resolves_none(
+    target: float, actual: float
+) -> None:
+    """`float("inf")` as both `target` and `actual` would otherwise produce an
+    undefined `inf/inf` ratio that `min()` silently resolves to a false
+    `100.0` "fully achieved" -- non-finite values must resolve to `None`
+    instead, never raise, never guess.
+    """
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": target, "rto_actual_minutes": actual}
+    )
+    assert rto_pct is None
+
+
+# --- _compute_testing_window_compliance -------------------------------------
+
+
+def test_compute_testing_window_compliance_inside_window_is_compliant() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-02-14"}, window)
+        == "compliant"
+    )
+
+
+def test_compute_testing_window_compliance_outside_window_is_non_compliant() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-06-01"}, window)
+        == "non_compliant"
+    )
+
+
+def test_compute_testing_window_compliance_wraps_year_boundary_is_compliant() -> None:
+    """Window wraps a year boundary (`window_start=11-01`, `window_end=02-28`)
+    -- a test_date in December falls inside it.
+    """
+    window = ((11, 1), (2, 28))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-12-15"}, window)
+        == "compliant"
+    )
+
+
+def test_compute_testing_window_compliance_wraps_year_boundary_january_is_compliant() -> (
+    None
+):
+    window = ((11, 1), (2, 28))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-01-10"}, window)
+        == "compliant"
+    )
+
+
+def test_compute_testing_window_compliance_wraps_year_boundary_summer_is_non_compliant() -> (
+    None
+):
+    window = ((11, 1), (2, 28))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-07-01"}, window)
+        == "non_compliant"
+    )
+
+
+def test_compute_testing_window_compliance_missing_test_date_is_unknown() -> None:
+    window = ((1, 1), (3, 31))
+    assert _compute_testing_window_compliance({}, window) == "unknown"
+
+
+def test_compute_testing_window_compliance_non_string_test_date_is_unknown() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": 20260214}, window) == "unknown"
+    )
+
+
+def test_compute_testing_window_compliance_unparseable_test_date_is_unknown() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": "not-a-date"}, window)
+        == "unknown"
+    )
+
+
+def test_compute_testing_window_compliance_wrong_format_test_date_is_unknown() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": "02/14/2026"}, window)
+        == "unknown"
+    )
+
+
+def test_compute_testing_window_compliance_missing_window_is_unknown() -> None:
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-02-14"}, None)
+        == "unknown"
+    )
+
+
+def test_compute_testing_window_compliance_single_day_window_exact_day_is_compliant() -> (
+    None
+):
+    """`window_start == window_end` (e.g. both `06-15`) is a valid edge of
+    the `start <= end` branch: a `test_date` of exactly that day is
+    compliant.
+    """
+    window = ((6, 15), (6, 15))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-06-15"}, window)
+        == "compliant"
+    )
+
+
+def test_compute_testing_window_compliance_single_day_window_other_day_is_non_compliant() -> (
+    None
+):
+    window = ((6, 15), (6, 15))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-06-16"}, window)
+        == "non_compliant"
+    )
+
+
+# --- get_record wiring: rto/rpo achieved pct --------------------------------
+
+
+def test_get_record_rto_achieved_pct_wired_from_folded_fields(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"rto_target_minutes": 70, "rto_actual_minutes": 100},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records", "payments-checkout", ledger_dir=ledger_dir
+    )
+
+    assert record.rto_achieved_pct == 70.0
+    assert record.rpo_achieved_pct is None
+
+
+def test_get_record_computes_achievement_generically_for_any_artifact_type(
+    ledger_dir: Path,
+) -> None:
+    """Genericity: the achieved-percentage computation is not hardcoded to a
+    "test_records" artifact_type -- any artifact_type carrying the raw
+    rto/rpo fields gets the same computation.
+    """
+    append_event(
+        RawFact(
+            artifact_type="some_other_artifact_type",
+            artifact_id="anything",
+            source="synthetic:test",
+            fields={"rpo_target_minutes": 30, "rpo_actual_minutes": 15},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "some_other_artifact_type", "anything", ledger_dir=ledger_dir
+    )
+
+    assert record.rto_achieved_pct is None
+    assert record.rpo_achieved_pct == 100.0
+
+
+def test_get_record_never_observed_artifact_achievement_and_compliance_are_none_unknown(
+    ledger_dir: Path,
+) -> None:
+    record = get_record("test_records", "never-observed", ledger_dir=ledger_dir)
+
+    assert record.rto_achieved_pct is None
+    assert record.rpo_achieved_pct is None
+    assert record.testing_window_compliance == "unknown"
+
+
+# --- get_record wiring: testing_window_compliance ---------------------------
+
+
+def test_get_record_testing_window_compliance_wired_compliant(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-02-14"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "payments-checkout",
+        ledger_dir=ledger_dir,
+        testing_window_path=window_path,
+    )
+
+    assert record.testing_window_compliance == "compliant"
+
+
+def test_get_record_testing_window_compliance_wired_non_compliant(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-08-01"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "payments-checkout",
+        ledger_dir=ledger_dir,
+        testing_window_path=window_path,
+    )
+
+    assert record.testing_window_compliance == "non_compliant"
+
+
+def test_get_record_testing_window_compliance_wraps_year_boundary_via_ledger_get_record(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """Acceptance criterion (Story 19): a `test_date` in December and a
+    window declared `11-01`..`02-28` resolves `testing_window_compliance=
+    "compliant"` -- proving the wraparound case works end-to-end through
+    `get_record`.
+    """
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 11-01\nwindow_end: 02-28\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-12-15"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "payments-checkout",
+        ledger_dir=ledger_dir,
+        testing_window_path=window_path,
+    )
+
+    assert record.testing_window_compliance == "compliant"
+
+
+def test_get_record_missing_testing_window_file_resolves_unknown_never_raises(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    missing_window_path = tmp_path / "does_not_exist.yaml"
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-02-14"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "payments-checkout",
+        ledger_dir=ledger_dir,
+        testing_window_path=missing_window_path,
+    )
+
+    assert record.testing_window_compliance == "unknown"
+
+
+def test_get_record_raises_testing_window_file_error_for_malformed_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(tmp_path, "window_start: 01-01\n")
+
+    with pytest.raises(TestingWindowFileError):
+        get_record(
+            "test_records",
+            "payments-checkout",
+            ledger_dir=ledger_dir,
+            testing_window_path=window_path,
+        )
+
+
+# --- list_records wiring: rto/rpo achieved pct + testing_window_compliance --
+
+
+def test_list_records_computes_achievement_and_compliance_per_record(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={
+                "rto_target_minutes": 70,
+                "rto_actual_minutes": 100,
+                "test_date": "2026-02-14",
+            },
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="network-core",
+            source="synthetic:test",
+            fields={
+                "rpo_target_minutes": 30,
+                "rpo_actual_minutes": 20,
+                "test_date": "2026-08-01",
+            },
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(
+        artifact_type="test_records",
+        ledger_dir=ledger_dir,
+        testing_window_path=window_path,
+    )
+
+    by_id = {record.artifact_id: record for record in records}
+    assert by_id["payments-checkout"].rto_achieved_pct == 70.0
+    assert by_id["payments-checkout"].testing_window_compliance == "compliant"
+    assert by_id["network-core"].rpo_achieved_pct == 100.0
+    assert by_id["network-core"].testing_window_compliance == "non_compliant"
+
+
+def test_list_records_missing_testing_window_file_every_record_resolves_unknown(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    missing_window_path = tmp_path / "does_not_exist.yaml"
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-02-14"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    [record] = list_records(
+        artifact_type="test_records",
+        ledger_dir=ledger_dir,
+        testing_window_path=missing_window_path,
+    )
+
+    assert record.testing_window_compliance == "unknown"
+
+
+def test_list_records_raises_testing_window_file_error_for_malformed_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(tmp_path, "window_start: 01-01\n")
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    with pytest.raises(TestingWindowFileError):
+        list_records(
+            artifact_type="test_records",
+            ledger_dir=ledger_dir,
+            testing_window_path=window_path,
+        )
+
+
+def test_list_records_corrupted_type_sentinel_has_none_achievement_and_unknown_compliance(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+
+    [sentinel] = list_records(artifact_type="broken_type", ledger_dir=ledger_dir)
+
+    assert sentinel.artifact_id == LOG_FORMAT_ERROR_ARTIFACT_ID
+    assert sentinel.rto_achieved_pct is None
+    assert sentinel.rpo_achieved_pct is None
+    assert sentinel.testing_window_compliance == "unknown"
+
+
+# --- I/O matrix row: RawFact rejects a computed field at construction ------
+
+
+def test_rawfact_with_testing_window_compliance_field_raises_before_appending(
+    ledger_dir: Path,
+) -> None:
+    with pytest.raises(SchemaValidationError):
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"testing_window_compliance": "compliant"},
+        )
+
+    assert read_events("test_records", ledger_dir=ledger_dir) == []
+    assert not (ledger_dir / "test_records.log.md").exists()
+
+
+# --- MCP tool surface: ledger_get_record / ledger_list_records expose the ---
+# --- three new keys ----------------------------------------------------------
+
+
+def test_ledger_get_record_tool_surfaces_rto_rpo_and_testing_window_compliance(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={
+                "rto_target_minutes": 70,
+                "rto_actual_minutes": 100,
+                "test_date": "2026-02-14",
+            },
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir, testing_window_path=window_path)
+
+    result = asyncio.run(
+        _call_ledger_get_record("test_records", "payments-checkout")
+    )
+
+    assert result.isError is False
+    assert result.structuredContent["rto_achieved_pct"] == 70.0
+    assert result.structuredContent["rpo_achieved_pct"] is None
+    assert result.structuredContent["testing_window_compliance"] == "compliant"
+
+
+def test_ledger_list_records_tool_surfaces_rto_rpo_and_testing_window_compliance(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={
+                "rpo_target_minutes": 30,
+                "rpo_actual_minutes": 20,
+                "test_date": "2026-08-01",
+            },
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir, testing_window_path=window_path)
+
+    result = asyncio.run(_call_ledger_list_records())
+
+    assert result.isError is False
+    [record] = result.structuredContent["result"]
+    assert record["rto_achieved_pct"] is None
+    assert record["rpo_achieved_pct"] == 100.0
+    assert record["testing_window_compliance"] == "non_compliant"
+
+
+# --- Independence from Story 17/18 -------------------------------------------
+
+
+def test_achieved_pct_computation_independent_of_tier_sla(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """Story 19 is fully independent of Story 17/18: an artifact with no
+    declared tier (tier_sla=None, risk="unknown") still gets its
+    rto_achieved_pct computed correctly.
+    """
+    missing_tiers_path = tmp_path / "does_not_exist_tiers.yaml"
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="undeclared-tier-artifact",
+            source="synthetic:test",
+            fields={"rto_target_minutes": 60, "rto_actual_minutes": 45},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "undeclared-tier-artifact",
+        ledger_dir=ledger_dir,
+        tiers_path=missing_tiers_path,
+    )
+
+    assert record.tier_sla is None
+    assert record.risk == "unknown"
+    assert record.rto_achieved_pct == 100.0

@@ -45,6 +45,14 @@ covers.
 
 No UI, no delivery channel -- this module returns structured data only, the
 same as `briefing.py`.
+
+Deliberately excluded: this module never passes a `testing_window_path` to
+`get_record`, and does not roll up `rto_achieved_pct`/`rpo_achieved_pct`/
+`testing_window_compliance` (Story 19, CAP-12) into `TierReadiness` or
+anywhere else in this aggregate view. Story 19 is independent of Story 18's
+aggregate view; wiring DR-test-achievement signals into this readiness
+rollup is a future story's decision, not something implied by either
+existing story.
 """
 
 from __future__ import annotations

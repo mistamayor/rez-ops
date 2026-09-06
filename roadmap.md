@@ -10,7 +10,7 @@ This is the human-facing narrative. The machine contract — capabilities, const
 
 ## Now — Shipped
 
-16 stories, 682 tests. The Sensors → Ledger → Voice paradigm, end to end:
+19 stories, 802 tests. The Sensors → Ledger → Voice paradigm, end to end:
 
 - 🟢 **Freshness Ledger core** — append-only event log, pure projection, explicit confidence (`agent-verified` / `manual` / `unknown`) on every derived value.
 - 🟢 **Six Sensors** (read-only, metadata only) — git, ServiceNow ticketing, Google Calendar, ServiceNow CMDB, Google Drive, SharePoint (Microsoft Graph).
@@ -18,18 +18,16 @@ This is the human-facing narrative. The machine contract — capabilities, const
 - 🟢 **Draft-not-send outbound content** — every drafted message sits in a queue; no auto-send path exists.
 - 🟢 **Periodic briefing + scheduled headless operation** — a daily briefing an OS scheduler can run unattended, with explicit failure logging.
 - 🟢 **Evidence-backed claims** (`EvidenceBundle`) — confidence computed exclusively by ledger-core from cited facts, never asserted by the caller.
-- 🟢 **Policy-gated action proposals** (`ActionProposal`) — `policy_decision` computed from config-declared risk and target criticality; no Executor exists yet, so nothing acts on it.
+- 🟢 **Policy-gated action proposals** (`ActionProposal`) — `policy_decision` computed from config-declared risk and target criticality, now genuinely reachable end to end (see below).
 - 🟢 **Cross-cutting hardening** — unambiguous per-connector provenance strings, stripped/validated credentials, graceful degradation on a corrupted ledger log.
+- 🟢 **DR risk classification (rules engine)** — `tier_sla`/expiry rules populated from a new config-declared tier vocabulary, a risk level (high/medium/low/unknown) computed from tier × freshness × confidence, RTO/RPO achieved as a percentage of target, and an annual testing-window compliance check (wraparound-aware). This is what finally makes the policy engine's `automatic` branch reachable against real data.
+- 🟢 **DR readiness summary query** — one new read-only MCP tool, `ledger_get_dr_readiness_summary`, rolling up risk per declared tier (no hardcoded axis list — however many tiers exist in config).
 
 ## Next
 
-Extends existing machinery — no new architecture decision required.
-
-- ⚪ **DR risk classification (rules engine)** — populate `tier_sla`/expiry rules (defined in the schema since the project's foundation, never populated by any story) and compute a risk level from tier × freshness × confidence, feeding directly into the already-built policy engine. Sharpened against a real reference design rather than left generic: RTO/RPO achieved as a percentage against target (not bare pass/fail), a mandated annual testing-window compliance check, and RAG broken down across three independent axes (application tier, infrastructure, data centres) rather than one flat list.
-- ⚪ **DR readiness summary query** — one new read-only MCP tool aggregating the above into a single call, the same shape as the existing `ledger_get_briefing`. A data endpoint, not a UI.
-- ⚪ **Executive dashboard, phase 1** — a regenerate-on-demand static HTML snapshot (no hosted server; stays inside the local-first constraint) rendering KPI tiles, RAG status, upcoming/recent tests, and the dependency map below. Look and feel already validated in a live prototype: warm-neutral palette, a single accent color, confidence expressed as a dot-fill (not just a bare percentage) everywhere a number claims to be known.
-- ⚪ **Evidence investigation panel ("Ask Rez Ops")** — a UI expression of the already-built `EvidenceBundle`: a cited, confidence-scored answer to a plain-language question, with explicit next actions (draft a message, propose an action) that stay inside the existing never-auto-act discipline — never a one-click "accept."
-- ⚪ **Dependency mapping (first cut)** — a generic `depends_on` edge on the existing artifact substrate, not the full typed domain model below; most likely sourced by extending the existing CMDB connector to also fetch ServiceNow's CI relationship data. *Placed here rather than Later because it doesn't require the domain-model decision to ship real value — flagged for confirmation, not yet locked in.*
+- 🟡 **Executive dashboard, phase 1** — a regenerate-on-demand static HTML snapshot (no hosted server; stays inside the local-first constraint) rendering KPI tiles, RAG status, upcoming/recent tests, and a dependency map. Look and feel validated in a live prototype (warm-neutral palette, a single accent color, confidence expressed as a dot-fill everywhere a number claims to be known) — not yet wired to real ledger data via a generation script.
+- 🟡 **Evidence investigation panel ("Ask Rez Ops")** — a UI expression of the already-built `EvidenceBundle`: a cited, confidence-scored answer to a plain-language question, with explicit next actions (draft a message, propose an action) that stay inside the existing never-auto-act discipline — never a one-click "accept." Validated in the same prototype; not yet backed by a real query.
+- 🟡 **Dependency mapping (first cut)** — a generic `depends_on` edge on the existing artifact substrate, not the full typed domain model below; most likely sourced by extending the existing CMDB connector to also fetch ServiceNow's CI relationship data. Rendering validated in the prototype (a real, interactive graph); the data side — an actual `depends_on` relationship and a connector to populate it — isn't built yet.
 
 ## Later — pending a dedicated architecture session
 
@@ -56,4 +54,4 @@ Each of these changes a real, current design decision (the generic `artifact_typ
 
 ---
 
-*Update this file whenever a Next/Later item ships or a new one gets scoped. Last updated 2026-09-06.*
+*Update this file whenever a Next/Later item ships or a new one gets scoped. Last updated 2026-09-06 (Stories 17–19 shipped, closing out the original "Next" rules-engine work).*
