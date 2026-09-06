@@ -79,7 +79,7 @@ class TiersFileError(ValueError):
     """
 
 
-def _load_tiers(tiers_path: Path) -> tuple[dict[str, int], dict[tuple[str, str], str]]:
+def load_tiers(tiers_path: Path) -> tuple[dict[str, int], dict[tuple[str, str], str]]:
     """Parse `rezops.tiers.yaml` into `(tiers, assignments)`.
 
     `tiers` maps a declared tier name to its `expiry_days` (a positive int).
@@ -380,7 +380,7 @@ def get_record(
     recorded facts at all.
 
     `tier_sla`/`expiry_rule`/`risk` are computed exclusively here too (Story
-    17, CAP-11), from `rezops.tiers.yaml` (`tiers_path`, `_load_tiers`) x this
+    17, CAP-11), from `rezops.tiers.yaml` (`tiers_path`, `load_tiers`) x this
     artifact's freshness x confidence (`_compute_tier_and_risk`) -- never
     accepted as input, never set by a connector. An artifact with no `assign`
     entry in that config resolves `tier_sla=None`/`expiry_rule=None`/
@@ -407,7 +407,7 @@ def get_record(
     last_verified = last_verified_by_artifact.get(artifact_id)
     confidence = _compute_confidence(fields)
 
-    tiers, assignments = _load_tiers(tiers_path)
+    tiers, assignments = load_tiers(tiers_path)
     tier_sla, expiry_rule, risk = _compute_tier_and_risk(
         artifact_type,
         artifact_id,
@@ -580,7 +580,7 @@ def list_records(
     data source exists yet. `tier_sla`/`expiry_rule`/`risk` are computed
     exclusively here too (Story 17, CAP-11), per record, via the same
     `_compute_tier_and_risk` rule `get_record` uses, against one shared
-    `rezops.tiers.yaml` read (`tiers_path`, `_load_tiers`) -- loaded once per
+    `rezops.tiers.yaml` read (`tiers_path`, `load_tiers`) -- loaded once per
     call, not once per record. `escalation_owner` is computed per record via
     `_compute_escalation_owner` (AD-10, Story 8).
     """
@@ -591,7 +591,7 @@ def list_records(
     else:
         candidate_types = _discover_artifact_types(ledger_dir)
 
-    tiers, assignments = _load_tiers(tiers_path)
+    tiers, assignments = load_tiers(tiers_path)
 
     records: list[LedgerRecord] = []
     for a_type in candidate_types:

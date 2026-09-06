@@ -23,8 +23,14 @@
 tier.platinum.expiry_days: 30
 tier.gold.expiry_days: 90
 tier.silver.expiry_days: 180
+tier.infrastructure.expiry_days: 60
+tier.data_centre.expiry_days: 120
 
 assign.bia/payments-checkout: platinum
 assign.runbooks/payments-checkout: platinum
 assign.raci/payments-checkout: gold
 assign.test_records/payments-checkout: silver
+assign.bia/network-core: infrastructure
+assign.runbooks/network-core: infrastructure
+assign.bia/primary-site: data_centre
+assign.raci/primary-site: data_centre

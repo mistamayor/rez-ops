@@ -23,6 +23,7 @@ from ledger_core import projection as projection_module
 from ledger_core import server as server_module
 from ledger_core.action_proposals import create_action_proposal
 from ledger_core.briefing import Briefing, get_briefing
+from ledger_core.dr_readiness import DrReadinessSummary, get_dr_readiness_summary
 from ledger_core.drafts import (
     DRAFT_FORMAT_ERROR_MARKER,
     Draft,
@@ -38,7 +39,7 @@ from ledger_core.projection import (
     LOG_FORMAT_ERROR_MARKER,
     TiersFileError,
     _compute_tier_and_risk,
-    _load_tiers,
+    load_tiers,
     get_coverage_map,
     get_record,
     list_records,
@@ -228,7 +229,7 @@ def test_ledger_record_rejects_invalid_risk_value() -> None:
 # --- Acceptance: MCP server exposes exactly one read tool -----------------
 
 
-def test_server_exposes_exactly_eleven_tools_none_calling_an_external_send_api() -> None:
+def test_server_exposes_exactly_twelve_tools_none_calling_an_external_send_api() -> None:
     """Acceptance criterion (Story 9, extended by Story 10, extended by Story
     12, extended by Story 13): a client listing tools sees `ledger_create_draft`
     and `ledger_list_drafts` alongside the four pre-existing tools, plus
@@ -256,6 +257,7 @@ def test_server_exposes_exactly_eleven_tools_none_calling_an_external_send_api()
         "ledger_get_briefing",
         "ledger_create_action_proposal",
         "ledger_list_action_proposals",
+        "ledger_get_dr_readiness_summary",
     ]
 
 
@@ -346,6 +348,11 @@ def _point_server_at(
         server_module,
         "list_evidence",
         lambda: list_evidence(ledger_dir=ledger_dir),
+    )
+    monkeypatch.setattr(
+        server_module,
+        "get_dr_readiness_summary",
+        lambda: get_dr_readiness_summary(ledger_dir=ledger_dir, **tiers_kwargs),
     )
 
 
@@ -3673,7 +3680,7 @@ def _write_tiers_file(tmp_path: Path, content: str) -> Path:
 
 
 def test_load_tiers_returns_empty_when_file_does_not_exist(tmp_path: Path) -> None:
-    tiers, assignments = _load_tiers(tmp_path / "does_not_exist.yaml")
+    tiers, assignments = load_tiers(tmp_path / "does_not_exist.yaml")
     assert tiers == {}
     assert assignments == {}
 
@@ -3689,7 +3696,7 @@ def test_load_tiers_parses_declarations_and_assignments(tmp_path: Path) -> None:
         "assign.runbooks/sys01: gold\n",
     )
 
-    tiers, assignments = _load_tiers(tiers_path)
+    tiers, assignments = load_tiers(tiers_path)
 
     assert tiers == {"platinum": 30, "gold": 90}
     assert assignments == {
@@ -3705,7 +3712,7 @@ def test_load_tiers_rejects_assignment_naming_undeclared_tier(tmp_path: Path) ->
     )
 
     with pytest.raises(TiersFileError):
-        _load_tiers(tiers_path)
+        load_tiers(tiers_path)
 
 
 def test_load_tiers_rejects_duplicate_tier_declaration(tmp_path: Path) -> None:
@@ -3715,7 +3722,7 @@ def test_load_tiers_rejects_duplicate_tier_declaration(tmp_path: Path) -> None:
     )
 
     with pytest.raises(TiersFileError):
-        _load_tiers(tiers_path)
+        load_tiers(tiers_path)
 
 
 def test_load_tiers_rejects_duplicate_assignment(tmp_path: Path) -> None:
@@ -3727,28 +3734,28 @@ def test_load_tiers_rejects_duplicate_assignment(tmp_path: Path) -> None:
     )
 
     with pytest.raises(TiersFileError):
-        _load_tiers(tiers_path)
+        load_tiers(tiers_path)
 
 
 def test_load_tiers_rejects_non_integer_expiry_days(tmp_path: Path) -> None:
     tiers_path = _write_tiers_file(tmp_path, "tier.platinum.expiry_days: soon\n")
 
     with pytest.raises(TiersFileError):
-        _load_tiers(tiers_path)
+        load_tiers(tiers_path)
 
 
 def test_load_tiers_rejects_non_positive_expiry_days(tmp_path: Path) -> None:
     tiers_path = _write_tiers_file(tmp_path, "tier.platinum.expiry_days: 0\n")
 
     with pytest.raises(TiersFileError):
-        _load_tiers(tiers_path)
+        load_tiers(tiers_path)
 
 
 def test_load_tiers_rejects_unparseable_line(tmp_path: Path) -> None:
     tiers_path = _write_tiers_file(tmp_path, "not a valid tiers line at all\n")
 
     with pytest.raises(TiersFileError):
-        _load_tiers(tiers_path)
+        load_tiers(tiers_path)
 
 
 # --- I/O matrix row: no declared tier --------------------------------------
@@ -4241,3 +4248,353 @@ def test_create_action_proposal_tier_sla_known_becomes_true_and_decision_is_auto
         "bia", "payments-checkout", ledger_dir=ledger_dir, tiers_path=tiers_path
     )
     assert record_after.risk == "low"
+
+
+# --- Story 18 (CAP-4): DR readiness summary --------------------------------
+#
+# `get_dr_readiness_summary` aggregates risk counts + an overall status per
+# tier declared in `rezops.tiers.yaml`, calling `projection.get_record` for
+# every assigned artifact -- never a parallel reimplementation of Story 17's
+# frozen risk formula.
+
+
+def _append_fact_days_ago(
+    ledger_dir: Path,
+    *,
+    artifact_type: str,
+    artifact_id: str,
+    days_ago: int,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            source="synthetic:story18",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+        timestamp=datetime.now(timezone.utc) - timedelta(days=days_ago),
+    )
+
+
+# --- I/O matrix row: multiple tiers, mixed risk -----------------------------
+
+
+def test_dr_readiness_multiple_tiers_mixed_risk_one_row_per_tier(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        "tier.gold.expiry_days: 90\n"
+        "tier.silver.expiry_days: 10\n"
+        "assign.bia/sys-high: platinum\n"
+        "assign.bia/sys-low: platinum\n"
+        "assign.runbooks/sys-medium: gold\n",
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-high", days_ago=45
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-low", days_ago=1
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="runbooks", artifact_id="sys-medium", days_ago=80
+    )
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert isinstance(summary, DrReadinessSummary)
+    by_name = {tier.name: tier for tier in summary.tiers}
+    assert set(by_name) == {"platinum", "gold", "silver"}
+
+    platinum = by_name["platinum"]
+    assert platinum.artifact_count == 2
+    assert platinum.risk_counts == {
+        "high": 1,
+        "medium": 0,
+        "low": 1,
+        "unknown": 0,
+    }
+    assert platinum.status == "high"
+
+    gold = by_name["gold"]
+    assert gold.artifact_count == 1
+    assert gold.risk_counts == {"high": 0, "medium": 1, "low": 0, "unknown": 0}
+    assert gold.status == "medium"
+
+    silver = by_name["silver"]
+    assert silver.artifact_count == 0
+    assert silver.risk_counts == {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    assert silver.status == "low"
+
+
+# --- I/O matrix row: tier with a high-risk artifact -------------------------
+
+
+def test_dr_readiness_high_risk_artifact_status_high_regardless_of_low_medium(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        "assign.bia/sys-low: platinum\n"
+        "assign.bia/sys-high: platinum\n"
+        "assign.runbooks/sys-low2: platinum\n",
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-low", days_ago=1
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-high", days_ago=60
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="runbooks", artifact_id="sys-low2", days_ago=2
+    )
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    [platinum] = summary.tiers
+    assert platinum.risk_counts["high"] == 1
+    assert platinum.risk_counts["low"] == 2
+    assert platinum.status == "high"
+
+
+# --- I/O matrix row: tier with only unknown-risk artifacts ------------------
+
+
+def test_dr_readiness_only_unknown_risk_status_unknown_ranks_above_low(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.gold.expiry_days: 90\n"
+        "assign.bia/sys-never-observed: gold\n"
+        "assign.runbooks/sys-never-observed2: gold\n",
+    )
+    # Neither artifact is ever observed -- both resolve confidence="unknown",
+    # so risk="unknown" (never a guess).
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    [gold] = summary.tiers
+    assert gold.artifact_count == 2
+    assert gold.risk_counts == {"high": 0, "medium": 0, "low": 0, "unknown": 2}
+    assert gold.status == "unknown"
+
+
+# --- I/O matrix row: tier declared but unassigned ---------------------------
+
+
+def test_dr_readiness_tier_declared_but_unassigned_zero_counts_status_low(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(tmp_path, "tier.gold.expiry_days: 90\n")
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    [gold] = summary.tiers
+    assert gold.name == "gold"
+    assert gold.artifact_count == 0
+    assert gold.risk_counts == {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    assert gold.status == "low"
+
+
+# --- I/O matrix row: no rezops.tiers.yaml -----------------------------------
+
+
+def test_dr_readiness_missing_tiers_file_returns_empty_tiers(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    missing_tiers_path = tmp_path / "does_not_exist.yaml"
+
+    summary = get_dr_readiness_summary(
+        ledger_dir=ledger_dir, tiers_path=missing_tiers_path
+    )
+
+    assert summary.tiers == ()
+    _assert_generated_at_is_utc_timestamp(summary.generated_at)
+
+
+# --- Malformed config: get_dr_readiness_summary still raises TiersFileError -
+
+
+def test_get_dr_readiness_summary_raises_tiers_file_error_for_malformed_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """Unlike a missing `rezops.tiers.yaml` (never raises), a malformed one
+    (here, an assignment naming an undeclared tier) still raises
+    `TiersFileError` via the initial `load_tiers` call -- consistent with
+    Story 17's own fail-loudly-on-malformed-config design.
+    """
+    tiers_path = _write_tiers_file(tmp_path, "assign.bia/sys01: nonexistent-tier\n")
+
+    with pytest.raises(TiersFileError):
+        get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+
+# --- I/O matrix row: empty ledger -------------------------------------------
+
+
+def test_dr_readiness_empty_ledger_every_tier_artifact_count_zero_never_raises(
+    tmp_path: Path,
+) -> None:
+    empty_ledger_dir = tmp_path / "ledger_data"
+    assert not empty_ledger_dir.exists()
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        "assign.bia/sys01: platinum\n"
+        "assign.runbooks/sys02: platinum\n",
+    )
+
+    summary = get_dr_readiness_summary(
+        ledger_dir=empty_ledger_dir, tiers_path=tiers_path
+    )
+
+    [platinum] = summary.tiers
+    # No log files exist at all -- both artifacts resolve confidence/risk
+    # "unknown" via get_record's own missing-log tolerance, not raising.
+    assert platinum.artifact_count == 2
+    assert platinum.risk_counts == {"high": 0, "medium": 0, "low": 0, "unknown": 2}
+    assert platinum.status == "unknown"
+    assert not empty_ledger_dir.exists()
+
+
+# --- Determinism: tiers sorted alphabetically by name -----------------------
+
+
+def test_dr_readiness_tiers_sorted_alphabetically_by_name(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.silver.expiry_days: 10\n"
+        "tier.platinum.expiry_days: 30\n"
+        "tier.gold.expiry_days: 90\n",
+    )
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert [tier.name for tier in summary.tiers] == ["gold", "platinum", "silver"]
+
+
+# --- get_dr_readiness_summary performs no mutation --------------------------
+
+
+def test_get_dr_readiness_summary_writes_nothing(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 30\nassign.bia/sys01: platinum\n"
+    )
+    _append_fact_days_ago(ledger_dir, artifact_type="bia", artifact_id="sys01", days_ago=1)
+    before_ledger = {
+        path.name: path.read_bytes()
+        for path in sorted(ledger_dir.rglob("*"))
+        if path.is_file()
+    }
+    before_tiers = tiers_path.read_bytes()
+
+    get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    after_ledger = {
+        path.name: path.read_bytes()
+        for path in sorted(ledger_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert before_ledger == after_ledger
+    assert tiers_path.read_bytes() == before_tiers
+
+
+# --- ledger_get_dr_readiness_summary MCP tool -------------------------------
+
+
+async def _call_ledger_get_dr_readiness_summary():
+    async with create_connected_server_and_client_session(mcp) as client:
+        return await client.call_tool("ledger_get_dr_readiness_summary", {})
+
+
+def test_ledger_get_dr_readiness_summary_tool_matches_direct_call(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        "assign.bia/sys-high: platinum\n"
+        "assign.bia/sys-low: platinum\n",
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-high", days_ago=45
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-low", days_ago=1
+    )
+    _point_server_at(monkeypatch, ledger_dir, tiers_path=tiers_path)
+
+    result = asyncio.run(_call_ledger_get_dr_readiness_summary())
+
+    assert result.isError is False
+    expected = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+    assert result.structuredContent == {
+        "tiers": [
+            {
+                "name": tier.name,
+                "artifact_count": tier.artifact_count,
+                "risk_counts": dict(tier.risk_counts),
+                "status": tier.status,
+            }
+            for tier in expected.tiers
+        ],
+        "generated_at": expected.generated_at,
+    }
+
+
+def test_ledger_get_dr_readiness_summary_tool_missing_tiers_file_never_raises(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing_tiers_path = tmp_path / "does_not_exist.yaml"
+    _point_server_at(monkeypatch, ledger_dir, tiers_path=missing_tiers_path)
+
+    result = asyncio.run(_call_ledger_get_dr_readiness_summary())
+
+    assert result.isError is False
+    assert result.structuredContent["tiers"] == []
+    assert result.structuredContent["generated_at"]
+
+
+def test_ledger_get_dr_readiness_summary_tool_malformed_tiers_file_surfaces_structured_error(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed `rezops.tiers.yaml` (here, an assignment naming an
+    undeclared tier) makes the underlying `TiersFileError` propagate through
+    the MCP tool the same way other typed exceptions already do for other
+    tools -- surfaced as a structured error (`isError` True), not silently
+    swallowed and not a crash.
+    """
+    tiers_path = _write_tiers_file(tmp_path, "assign.bia/sys01: nonexistent-tier\n")
+    _point_server_at(monkeypatch, ledger_dir, tiers_path=tiers_path)
+
+    result = asyncio.run(_call_ledger_get_dr_readiness_summary())
+
+    assert result.isError is True
+    assert result.content
+    assert "nonexistent-tier" in result.content[0].text
+
+
+def test_ledger_get_dr_readiness_summary_tool_performs_no_write(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance criterion: the tool issues no write of any kind -- calling
+    it never creates `ledger_dir` or any file inside it.
+    """
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 30\nassign.bia/sys01: platinum\n"
+    )
+    assert not ledger_dir.exists()
+    _point_server_at(monkeypatch, ledger_dir, tiers_path=tiers_path)
+
+    result = asyncio.run(_call_ledger_get_dr_readiness_summary())
+
+    assert result.isError is False
+    assert not ledger_dir.exists()

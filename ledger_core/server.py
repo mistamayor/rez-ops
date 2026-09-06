@@ -1,6 +1,6 @@
 """Ledger-core MCP server (AD-1, AD-2): ledger-core is its own MCP server.
 
-Exposes eleven tools: a read/query surface over projection.py
+Exposes twelve tools: a read/query surface over projection.py
 (`ledger_get_record`, `ledger_get_coverage`, `ledger_list_records`), the one
 and only ingestion path into the append-only log (`ledger_ingest_raw_fact`),
 the draft-not-send outbound content queue over drafts.py
@@ -8,9 +8,10 @@ the draft-not-send outbound content queue over drafts.py
 periodic briefing over briefing.py (`ledger_get_briefing` -- CAP-7, Story
 10), the evidence-backed-claims queue over evidence.py
 (`ledger_create_evidence`, `ledger_list_evidence` -- AD-11, CAP-9, Story 12),
-and the policy-gated action-proposal queue over action_proposals.py
+the policy-gated action-proposal queue over action_proposals.py
 (`ledger_create_action_proposal`, `ledger_list_action_proposals` -- AD-12,
-CAP-10, Story 13). Ledger state can only ever be changed by appending to the
+CAP-10, Story 13), and the DR readiness roll-up over dr_readiness.py
+(`ledger_get_dr_readiness_summary` -- CAP-4, Story 18). Ledger state can only ever be changed by appending to the
 log (AD-3) -- `ledger_ingest_raw_fact` constructs a `RawFact` and calls
 `append_event`; it has no other side effect and no `confidence` parameter
 (confidence is computed exclusively by `projection.get_record`, AD-5).
@@ -30,7 +31,9 @@ evidence, never accepted as input (AD-11). Neither
 `ledger_get_briefing`, like every other read tool here, performs no write of
 any kind -- it composes
 `get_record`/`list_records`/`list_drafts`/`get_coverage_map`'s own results,
-nothing more.
+nothing more. `ledger_get_dr_readiness_summary` is likewise read-only -- it
+composes `load_tiers`/`get_record`'s own results, never recomputing risk a
+second way.
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ from ledger_core.action_proposals import (
     list_action_proposals,
 )
 from ledger_core.briefing import get_briefing
+from ledger_core.dr_readiness import TierReadiness, get_dr_readiness_summary
 from ledger_core.drafts import Draft, create_draft, list_drafts
 from ledger_core.evidence import (
     EvidenceBundle,
@@ -79,6 +83,21 @@ def _record_to_dict(record: LedgerRecord) -> dict[str, Any]:
         "escalation_owner": record.escalation_owner,
         "confidence": record.confidence,
         "risk": record.risk,
+    }
+
+
+def _tier_readiness_to_dict(tier: TierReadiness) -> dict[str, Any]:
+    """The one TierReadiness-to-dict shape `ledger_get_dr_readiness_summary` serializes.
+
+    `dict(tier.risk_counts)` copies the per-tier tally rather than aliasing
+    it -- the same discipline `ledger_get_briefing` applies to
+    `data_quality_issues`'s nested dicts.
+    """
+    return {
+        "name": tier.name,
+        "artifact_count": tier.artifact_count,
+        "risk_counts": dict(tier.risk_counts),
+        "status": tier.status,
     }
 
 
@@ -511,6 +530,38 @@ def ledger_list_action_proposals() -> list[dict[str, Any]]:
     when the log doesn't exist yet (no proposal has ever been created).
     """
     return [_action_proposal_to_dict(proposal) for proposal in list_action_proposals()]
+
+
+@mcp.tool(name="ledger_get_dr_readiness_summary")
+def ledger_get_dr_readiness_summary() -> dict[str, Any]:
+    """Return DR readiness rolled up per declared tier (CAP-4, Story 18).
+
+    Composes only `ledger_core.projection.load_tiers` and
+    `ledger_core.projection.get_record` -- no new risk computation: every
+    per-artifact `risk` folded into a tier's `risk_counts` is exactly what
+    `ledger_get_record` would return for that artifact, never a parallel
+    reimplementation of Story 17's frozen risk formula. One row per tier
+    declared in `rezops.tiers.yaml`, sorted alphabetically by tier name --
+    however many tiers are actually declared, never a hardcoded axis list.
+
+    Each row's `status` is the single worst risk level present among that
+    tier's assigned artifacts, using the fixed severity order `high >
+    medium > unknown > low` (`unknown` outranks `low` -- "nothing observed
+    yet" must never look as safe as "confirmed low risk"). A tier with no
+    assigned artifacts reports `artifact_count=0`, every `risk_counts` value
+    `0`, and `status="low"`.
+
+    Read-only: performs no write of any kind (no log append, no config
+    write, no draft). Never raises for a missing `rezops.tiers.yaml` --
+    `tiers` is simply `[]` -- or an empty/nonexistent ledger directory.
+    `generated_at` is the UTC timestamp this summary was assembled, so a
+    caller can tell how fresh it is.
+    """
+    summary = get_dr_readiness_summary()
+    return {
+        "tiers": [_tier_readiness_to_dict(tier) for tier in summary.tiers],
+        "generated_at": summary.generated_at,
+    }
 
 
 def main() -> None:
