@@ -18,7 +18,7 @@ Full architecture: [`_bmad-output/planning-artifacts/architecture/architecture-R
 
 ## Status
 
-All 16 planned stories shipped, 682 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
+All 20 planned stories shipped, 820 tests passing. See [`_bmad-output/specs/spec-rez-ops/stories.yaml`](_bmad-output/specs/spec-rez-ops/stories.yaml) for the full breakdown.
 
 **Built:**
 - Shared `RawFact`/`LedgerRecord` schema and append-only ledger core (confidence, coverage, live queries)
@@ -39,7 +39,7 @@ All 16 planned stories shipped, 682 tests passing. See [`_bmad-output/specs/spec
 
 ```bash
 uv sync
-uv run pytest -v      # 682 tests, all mocked/local — no live credentials needed to run the suite
+uv run pytest -v      # 820 tests, all mocked/local — no live credentials needed to run the suite
 ```
 
 This is enough to develop and test Rez Ops. To actually *use* it against real systems, continue to the User Guide.
@@ -48,7 +48,7 @@ This is enough to develop and test Rez Ops. To actually *use* it against real sy
 
 ## User Guide
 
-Rez Ops has no CLI and no UI of its own — every one of the 17 tools below is an MCP tool call, and you drive it by talking to an MCP-compatible client (Claude Code is the reference runtime) in natural language. This section walks through going from a fresh checkout to a running daily briefing.
+Rez Ops has no CLI and no UI of its own — every one of the 18 tools below is an MCP tool call, and you drive it by talking to an MCP-compatible client (Claude Code is the reference runtime) in natural language. This section walks through going from a fresh checkout to a running daily briefing.
 
 ### 1. Set connector credentials
 
@@ -84,7 +84,7 @@ cd /path/to/rez-ops
 claude
 ```
 
-Claude Code detects `.mcp.json` automatically and (on first use) will prompt you to approve the project-scoped servers. Once approved, all 17 tools below are available to it. If you're using a different MCP client, point it at the same `.mcp.json`.
+Claude Code detects `.mcp.json` automatically and (on first use) will prompt you to approve the project-scoped servers. Once approved, all 18 tools below are available to it. If you're using a different MCP client, point it at the same `.mcp.json`.
 
 ### 3. Core concepts
 
@@ -92,12 +92,13 @@ Claude Code detects `.mcp.json` automatically and (on first use) will prompt you
 - **RawFact vs. LedgerRecord** — a connector tool returns a *RawFact*: one observed fact from one source system, with no confidence or ownership attached (AD-9). Calling `ledger_ingest_raw_fact` records that fact into the ledger's append-only log. A *LedgerRecord* (what you get back from `ledger_get_record`/`ledger_list_records`) is ledger-core's computed view over every fact ever ingested for that artifact — confidence, escalation owner, and orphan-risk status are all derived, never something you set directly.
 - **Confidence is never hidden** — every record's `confidence` is one of `agent-verified`, `manual`, or `unknown`. There's no "assume it's fine" state; if nothing has ever ingested a fact for an artifact, it's `unknown`, visibly.
 - **Escalation owner & orphan-risk** — ledger-core picks one owner per artifact from whichever of these fields is present, in priority order: CMDB's `support_group` > ticketing's `assigned_to` > calendar's `organizer_email`. An artifact with facts but none of those three fields is *orphan-risk* — known to exist, but nobody's on the hook for it.
+- **DR test achievement & testing-window compliance** — if an artifact carries `rto_target_minutes`/`rto_actual_minutes` (and/or the `rpo_*` pair), `ledger_get_record`/`ledger_list_records` report `rto_achieved_pct`/`rpo_achieved_pct` — a computed percentage capped at 100, `None` if the pair is missing/invalid. If it carries a `test_date`, `testing_window_compliance` (`compliant`/`non_compliant`/`unknown`) is computed against the annual window declared in [`rezops.testing_window.yaml`](rezops.testing_window.yaml). All three are ledger-core-computed, never something you set directly.
 - **`EvidenceBundle`** — a citable, evidence-backed claim: `claim` + `reasoning` (your text) plus `evidence` (a list of citations, each naming one artifact and either a fact's `source` or a `LedgerRecord` field). `confidence` is never something you set — ledger-core computes it as the fraction of citations that actually resolve against current ledger state.
 - **`ActionProposal` & `policy_decision`** — a proposed action (e.g. `create_ticket`), citing at least one `EvidenceBundle`. `impact` and `policy_decision` (`automatic`/`requires_approval`/`denied`) are both ledger-core-computed, never something you set. **Nothing executes a proposal** — `policy_decision` is recorded and returned, that's it. There is no Executor in this system.
 
 ### 4. The tools
 
-**Ledger-core** (11 tools — the only thing that ever writes to the ledger):
+**Ledger-core** (12 tools — the only thing that ever writes to the ledger):
 
 | Tool | Purpose |
 |---|---|
@@ -112,6 +113,7 @@ Claude Code detects `.mcp.json` automatically and (on first use) will prompt you
 | `ledger_create_action_proposal(action, target_artifact_type, target_artifact_id, reason, evidence)` | Propose a system-state-changing `action` (from `rezops.policy.yaml`'s fixed vocabulary) citing evidence bundle ids; records ledger-core's computed `impact`/`policy_decision` (`automatic`/`requires_approval`/`denied`). Never itself acts on that decision. |
 | `ledger_list_action_proposals()` | List every ActionProposal ever created, with its policy decision. |
 | `ledger_get_briefing()` | The daily briefing: orphan-risk artifacts, unknown-confidence artifacts, pending drafts, and any data-quality issues, in one call. |
+| `ledger_get_dr_readiness_summary()` | DR readiness rolled up per tier declared in `rezops.tiers.yaml`: artifact count, risk-level counts, and an overall status per tier, in one call. |
 
 **Sensors** (6 tools — one per connector, each returns a RawFact-shaped dict, never writes to the ledger itself):
 
@@ -170,6 +172,8 @@ calls `ledger_create_action_proposal`. `action` must be one of the names declare
 
 `ops/run_scheduled_briefing.py` invokes `claude -p --mcp-config .mcp.json --output-format json` non-interactively and logs any failure (never fails silently) to `ledger_data/_ops.log.md`. Full setup, including sample crontab/launchd snippets, is in [`ops/README.md`](ops/README.md) — registering an actual scheduled job is a manual step nothing in this repo does for you.
 
+`ops/generate_dashboard.py` (`uv run python -m ops.generate_dashboard`) generates a static, read-only executive dashboard snapshot at `ledger_data/dashboard.html` by default — see [`ops/README.md`](ops/README.md) for details.
+
 ---
 
 ## Project layout
@@ -191,6 +195,7 @@ ledger_data/             # Runtime state: append-only logs (git-committed, human
   action_proposals.log.md # ActionProposal proposed/decided events (append-only log, not per-artifact-type)
 .mcp.json                # Project-scoped registration of ledger-core + all six connector servers
 rezops.policy.yaml       # Fixed action vocabulary + declared impact for ActionProposal (git-tracked, inputs only)
+rezops.testing_window.yaml # Declared annual DR-test window (window_start/window_end, git-tracked, inputs only)
 _bmad-output/            # Planning artifacts, spec, architecture, per-story specs, deferred-work log
 ```
 

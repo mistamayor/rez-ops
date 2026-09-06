@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -21,7 +21,9 @@ from connectors.git_repo.server import git_get_last_touched
 from connectors.ticketing.server import ticketing_get_ticket_status
 from ledger_core import projection as projection_module
 from ledger_core import server as server_module
+from ledger_core.action_proposals import create_action_proposal
 from ledger_core.briefing import Briefing, get_briefing
+from ledger_core.dr_readiness import DrReadinessSummary, get_dr_readiness_summary
 from ledger_core.drafts import (
     DRAFT_FORMAT_ERROR_MARKER,
     Draft,
@@ -30,11 +32,18 @@ from ledger_core.drafts import (
     create_draft,
     list_drafts,
 )
-from ledger_core.evidence import create_evidence_bundle, list_evidence
+from ledger_core.evidence import EvidenceRef, create_evidence_bundle, list_evidence
 from ledger_core.log import LogFormatError, append_event, read_events
 from ledger_core.projection import (
     LOG_FORMAT_ERROR_ARTIFACT_ID,
     LOG_FORMAT_ERROR_MARKER,
+    TestingWindowFileError,
+    TiersFileError,
+    _compute_test_achievement,
+    _compute_testing_window_compliance,
+    _compute_tier_and_risk,
+    load_testing_window,
+    load_tiers,
     get_coverage_map,
     get_record,
     list_records,
@@ -113,7 +122,17 @@ def test_conflicting_rawfacts_both_appended_nothing_overwritten(
 # --- I/O matrix row 3: RawFact attempts a LedgerRecord-only field ---------
 
 
-@pytest.mark.parametrize("forbidden_key", ["confidence", "tier_sla"])
+@pytest.mark.parametrize(
+    "forbidden_key",
+    [
+        "confidence",
+        "tier_sla",
+        "risk",
+        "rto_achieved_pct",
+        "rpo_achieved_pct",
+        "testing_window_compliance",
+    ],
+)
 def test_rawfact_rejects_ledger_record_only_field(
     ledger_dir: Path, forbidden_key: str
 ) -> None:
@@ -144,6 +163,7 @@ def test_query_for_artifact_with_no_recorded_facts_returns_unknown_never_raises(
     assert record.verification_method is None
     assert record.expiry_rule is None
     assert record.tier_sla is None
+    assert record.risk == "unknown"
     assert record.escalation_owner is None
 
 
@@ -211,10 +231,41 @@ def test_ledger_record_rejects_invalid_confidence_value() -> None:
         )
 
 
+def test_ledger_record_rejects_invalid_risk_value() -> None:
+    with pytest.raises(SchemaValidationError):
+        LedgerRecord(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            risk="catastrophic",
+        )
+
+
+def test_ledger_record_rejects_invalid_testing_window_compliance_value() -> None:
+    with pytest.raises(SchemaValidationError):
+        LedgerRecord(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            testing_window_compliance="probably",
+        )
+
+
+@pytest.mark.parametrize("field_name", ["rto_achieved_pct", "rpo_achieved_pct"])
+@pytest.mark.parametrize("bad_value", [150.0, -1.0])
+def test_ledger_record_rejects_out_of_range_achieved_pct_value(
+    field_name: str, bad_value: float
+) -> None:
+    with pytest.raises(SchemaValidationError):
+        LedgerRecord(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            **{field_name: bad_value},
+        )
+
+
 # --- Acceptance: MCP server exposes exactly one read tool -----------------
 
 
-def test_server_exposes_exactly_eleven_tools_none_calling_an_external_send_api() -> None:
+def test_server_exposes_exactly_twelve_tools_none_calling_an_external_send_api() -> None:
     """Acceptance criterion (Story 9, extended by Story 10, extended by Story
     12, extended by Story 13): a client listing tools sees `ledger_create_draft`
     and `ledger_list_drafts` alongside the four pre-existing tools, plus
@@ -242,10 +293,16 @@ def test_server_exposes_exactly_eleven_tools_none_calling_an_external_send_api()
         "ledger_get_briefing",
         "ledger_create_action_proposal",
         "ledger_list_action_proposals",
+        "ledger_get_dr_readiness_summary",
     ]
 
 
-def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
+def _point_server_at(
+    monkeypatch: pytest.MonkeyPatch,
+    ledger_dir: Path,
+    tiers_path: Path | None = None,
+    testing_window_path: Path | None = None,
+) -> None:
     """Redirect every ledger_dir-touching name ledger_core.server binds to an
     isolated tmp ledger dir.
 
@@ -255,12 +312,31 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
     through the MCP tool surface. Patching the names the handlers look up at
     call time lets tests exercise the *real* tools without ever touching the
     real, git-committed ledger_data/ directory.
+
+    `tiers_path`, if given, is forwarded to `get_record`/`list_records` too
+    (Story 17, CAP-11) -- otherwise both fall back to their own default
+    (the real, git-committed `rezops.tiers.yaml`), which is fine for any
+    test that only asserts on a synthetic artifact_type/artifact_id no real
+    tier is ever assigned to. `testing_window_path`, if given, is likewise
+    forwarded to `get_record`/`list_records` (Story 19, CAP-12) -- otherwise
+    both fall back to their own default (the real, git-committed
+    `rezops.testing_window.yaml`), which is fine for any test that never sets
+    a `test_date` field.
     """
+    # `tiers_kwargs` alone is reused by `get_dr_readiness_summary` below,
+    # which accepts a `tiers_path` but no `testing_window_path` (Story 19 is
+    # explicitly not wired into that aggregate view) -- so
+    # `testing_window_path` is only added to the wider `record_kwargs` used
+    # by `get_record`/`list_records`.
+    tiers_kwargs = {"tiers_path": tiers_path} if tiers_path is not None else {}
+    record_kwargs = dict(tiers_kwargs)
+    if testing_window_path is not None:
+        record_kwargs["testing_window_path"] = testing_window_path
     monkeypatch.setattr(
         server_module,
         "get_record",
         lambda artifact_type, artifact_id: get_record(
-            artifact_type, artifact_id, ledger_dir=ledger_dir
+            artifact_type, artifact_id, ledger_dir=ledger_dir, **record_kwargs
         ),
     )
     monkeypatch.setattr(
@@ -281,6 +357,7 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
             confidence=confidence,
             orphan_risk=orphan_risk,
             ledger_dir=ledger_dir,
+            **record_kwargs,
         ),
     )
     monkeypatch.setattr(
@@ -323,6 +400,11 @@ def _point_server_at(monkeypatch: pytest.MonkeyPatch, ledger_dir: Path) -> None:
         "list_evidence",
         lambda: list_evidence(ledger_dir=ledger_dir),
     )
+    monkeypatch.setattr(
+        server_module,
+        "get_dr_readiness_summary",
+        lambda: get_dr_readiness_summary(ledger_dir=ledger_dir, **tiers_kwargs),
+    )
 
 
 async def _call_ledger_get_record(artifact_type: str, artifact_id: str):
@@ -359,6 +441,10 @@ def test_ledger_get_record_tool_matches_get_record(
         "tier_sla": expected.tier_sla,
         "escalation_owner": expected.escalation_owner,
         "confidence": expected.confidence,
+        "risk": expected.risk,
+        "rto_achieved_pct": expected.rto_achieved_pct,
+        "rpo_achieved_pct": expected.rpo_achieved_pct,
+        "testing_window_compliance": expected.testing_window_compliance,
     }
 
 
@@ -397,6 +483,10 @@ def test_ledger_get_record_tool_returns_fail_open_record_on_log_format_error(
         "tier_sla": expected.tier_sla,
         "escalation_owner": expected.escalation_owner,
         "confidence": expected.confidence,
+        "risk": expected.risk,
+        "rto_achieved_pct": expected.rto_achieved_pct,
+        "rpo_achieved_pct": expected.rpo_achieved_pct,
+        "testing_window_compliance": expected.testing_window_compliance,
     }
     assert expected.fields == {}
     assert expected.confidence == "unknown"
@@ -1248,12 +1338,19 @@ def test_list_records_filtered_by_confidence_returns_only_matching_records(
 
 
 def test_list_records_with_corrupted_type_present_surfaces_sentinel_and_healthy(
-    ledger_dir: Path,
+    ledger_dir: Path, tmp_path: Path
 ) -> None:
     """A corrupted type is no longer silently dropped (finding #1): it's
     represented by exactly one sentinel record alongside the healthy type's
     real records -- never indistinguishable from "no artifacts of this
     type exist".
+
+    Also (Patch 4, regression guard): the sentinel's `tier_sla`/
+    `expiry_rule`/`risk` are genuinely wired through `_compute_tier_and_risk`
+    against its own synthetic `(artifact_type, LOG_FORMAT_ERROR_ARTIFACT_ID)`
+    key -- a tiers fixture that declares an assignment against exactly that
+    key must be reflected on the sentinel, not just left at the defaults a
+    dropped wiring would also produce.
     """
     ledger_dir.mkdir(parents=True)
     (ledger_dir / "broken_type.log.md").write_text(
@@ -1268,8 +1365,13 @@ def test_list_records_with_corrupted_type_present_surfaces_sentinel_and_healthy(
         ),
         ledger_dir=ledger_dir,
     )
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        f"assign.broken_type/{LOG_FORMAT_ERROR_ARTIFACT_ID}: platinum\n",
+    )
 
-    records = list_records(ledger_dir=ledger_dir)
+    records = list_records(ledger_dir=ledger_dir, tiers_path=tiers_path)
 
     by_type = {record.artifact_type: record for record in records}
     assert len(records) == 2
@@ -1278,6 +1380,13 @@ def test_list_records_with_corrupted_type_present_surfaces_sentinel_and_healthy(
     assert sentinel.artifact_id == LOG_FORMAT_ERROR_ARTIFACT_ID
     assert sentinel.confidence == "unknown"
     assert sentinel.last_verified is None
+    # The tiers fixture declares an assignment against exactly the
+    # sentinel's own synthetic (artifact_type, artifact_id) key -- this
+    # would still be (None, None, "unknown") if the wiring were dropped
+    # entirely, so this is a genuine regression guard, not a tautology.
+    assert sentinel.tier_sla == "platinum"
+    assert sentinel.expiry_rule == "30 days"
+    assert sentinel.risk == "unknown"
 
 
 def test_list_records_filtered_directly_to_corrupted_type_returns_sentinel(
@@ -1517,6 +1626,10 @@ def _expected_list_records_payload(records) -> list[dict]:
             "tier_sla": record.tier_sla,
             "escalation_owner": record.escalation_owner,
             "confidence": record.confidence,
+            "risk": record.risk,
+            "rto_achieved_pct": record.rto_achieved_pct,
+            "rpo_achieved_pct": record.rpo_achieved_pct,
+            "testing_window_compliance": record.testing_window_compliance,
         }
         for record in records
     ]
@@ -3610,3 +3723,1723 @@ def test_ledger_get_briefing_tool_surfaces_corrupted_type_in_data_quality_issues
     assert result.structuredContent["data_quality_issues"] == {
         "broken_type": {LOG_FORMAT_ERROR_MARKER: 1}
     }
+
+
+# --- Story 17 (CAP-11): Tier assignment & DR risk classification ----------
+#
+# `rezops.tiers.yaml` declares the tier vocabulary + assignments (Story 17's
+# own hand-rolled parser, mirroring `_load_policy`'s discipline).
+# `get_record`/`list_records` compute `tier_sla`/`expiry_rule`/`risk` from it
+# x freshness x confidence -- never accepted as connector/caller input.
+
+
+def _write_tiers_file(tmp_path: Path, content: str) -> Path:
+    path = tmp_path / "rezops.tiers.yaml"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_load_tiers_returns_empty_when_file_does_not_exist(tmp_path: Path) -> None:
+    tiers, assignments = load_tiers(tmp_path / "does_not_exist.yaml")
+    assert tiers == {}
+    assert assignments == {}
+
+
+def test_load_tiers_parses_declarations_and_assignments(tmp_path: Path) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "# a comment, ignored\n"
+        "tier.platinum.expiry_days: 30\n"
+        "tier.gold.expiry_days: 90\n"
+        "\n"
+        "assign.bia/sys01: platinum\n"
+        "assign.runbooks/sys01: gold\n",
+    )
+
+    tiers, assignments = load_tiers(tiers_path)
+
+    assert tiers == {"platinum": 30, "gold": 90}
+    assert assignments == {
+        ("bia", "sys01"): "platinum",
+        ("runbooks", "sys01"): "gold",
+    }
+
+
+def test_load_tiers_rejects_assignment_naming_undeclared_tier(tmp_path: Path) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\nassign.bia/sys01: mythril\n",
+    )
+
+    with pytest.raises(TiersFileError):
+        load_tiers(tiers_path)
+
+
+def test_load_tiers_rejects_duplicate_tier_declaration(tmp_path: Path) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\ntier.platinum.expiry_days: 60\n",
+    )
+
+    with pytest.raises(TiersFileError):
+        load_tiers(tiers_path)
+
+
+def test_load_tiers_rejects_duplicate_assignment(tmp_path: Path) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        "assign.bia/sys01: platinum\n"
+        "assign.bia/sys01: platinum\n",
+    )
+
+    with pytest.raises(TiersFileError):
+        load_tiers(tiers_path)
+
+
+def test_load_tiers_rejects_non_integer_expiry_days(tmp_path: Path) -> None:
+    tiers_path = _write_tiers_file(tmp_path, "tier.platinum.expiry_days: soon\n")
+
+    with pytest.raises(TiersFileError):
+        load_tiers(tiers_path)
+
+
+def test_load_tiers_rejects_non_positive_expiry_days(tmp_path: Path) -> None:
+    tiers_path = _write_tiers_file(tmp_path, "tier.platinum.expiry_days: 0\n")
+
+    with pytest.raises(TiersFileError):
+        load_tiers(tiers_path)
+
+
+def test_load_tiers_rejects_unparseable_line(tmp_path: Path) -> None:
+    tiers_path = _write_tiers_file(tmp_path, "not a valid tiers line at all\n")
+
+    with pytest.raises(TiersFileError):
+        load_tiers(tiers_path)
+
+
+# --- I/O matrix row: no declared tier --------------------------------------
+
+
+def test_get_record_no_declared_tier_resolves_risk_unknown_tier_sla_none(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(tmp_path, "tier.platinum.expiry_days: 30\n")
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="undeclared",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "bia", "undeclared", ledger_dir=ledger_dir, tiers_path=tiers_path
+    )
+
+    assert record.tier_sla is None
+    assert record.expiry_rule is None
+    assert record.risk == "unknown"
+
+
+# --- I/O matrix row: declared tier, never observed -------------------------
+
+
+def test_get_record_declared_tier_never_observed_resolves_risk_unknown(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 30\nassign.bia/sys01: platinum\n"
+    )
+
+    record = get_record("bia", "sys01", ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert record.tier_sla == "platinum"
+    assert record.expiry_rule == "30 days"
+    assert record.risk == "unknown"
+    assert record.last_verified is None
+    assert record.confidence == "unknown"
+
+
+# --- I/O matrix row: fresh, tiered artifact ---------------------------------
+
+
+def test_get_record_fresh_within_75_percent_of_expiry_resolves_risk_low(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 100\nassign.bia/sys01: platinum\n"
+    )
+    fresh_timestamp = datetime.now(timezone.utc) - timedelta(days=10)
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+        timestamp=fresh_timestamp,
+    )
+
+    record = get_record("bia", "sys01", ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert record.tier_sla == "platinum"
+    assert record.expiry_rule == "100 days"
+    assert record.risk == "low"
+
+
+# --- I/O matrix row: approaching expiry -------------------------------------
+
+
+def test_get_record_between_75_and_100_percent_of_expiry_resolves_risk_medium(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 100\nassign.bia/sys01: platinum\n"
+    )
+    approaching_timestamp = datetime.now(timezone.utc) - timedelta(days=85)
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+        timestamp=approaching_timestamp,
+    )
+
+    record = get_record("bia", "sys01", ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert record.risk == "medium"
+
+
+# --- I/O matrix row: past expiry --------------------------------------------
+
+
+def test_get_record_past_expiry_resolves_risk_high(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 100\nassign.bia/sys01: platinum\n"
+    )
+    expired_timestamp = datetime.now(timezone.utc) - timedelta(days=150)
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+        timestamp=expired_timestamp,
+    )
+
+    record = get_record("bia", "sys01", ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert record.risk == "high"
+
+
+# --- Exact-boundary tests (Patch 8): the frozen formula uses strict `>` ----
+
+
+def test_get_record_exactly_at_expiry_days_resolves_risk_medium_not_high(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """`days_since == expiry_days` exactly is the medium/high boundary. The
+    frozen formula uses strict `>`, so landing exactly on the expiry date
+    resolves "medium", not "high".
+    """
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 100\nassign.bia/sys01: platinum\n"
+    )
+    exactly_at_expiry_timestamp = datetime.now(timezone.utc) - timedelta(days=100)
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+        timestamp=exactly_at_expiry_timestamp,
+    )
+
+    record = get_record("bia", "sys01", ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert record.risk == "medium"
+
+
+def test_get_record_exactly_at_75_percent_of_expiry_resolves_risk_low_not_medium(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """`days_since` landing exactly on the 75%-of-expiry threshold is the
+    low/medium boundary. The frozen formula uses strict `>`, so landing
+    exactly on that threshold resolves "low", not "medium".
+    """
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 100\nassign.bia/sys01: platinum\n"
+    )
+    exactly_at_threshold_timestamp = datetime.now(timezone.utc) - timedelta(days=75)
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+        timestamp=exactly_at_threshold_timestamp,
+    )
+
+    record = get_record("bia", "sys01", ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert record.risk == "low"
+
+
+# --- confidence == "manual" (Patch 6): verified-enough-to-assess-freshness --
+
+
+def test_compute_tier_and_risk_treats_manual_confidence_same_as_agent_verified() -> None:
+    """`confidence == "manual"` is a valid `CONFIDENCE_VALUES` member -- a
+    human explicitly attested the fact -- and must be treated as
+    verified-enough-to-assess-freshness, exactly like "agent-verified", not
+    collapsed to the same risk="unknown" as never-observed. No current code
+    path produces "manual" confidence yet, but `_compute_tier_and_risk` must
+    still handle it correctly since the schema allows it.
+    """
+    tiers = {"platinum": 100}
+    assignments = {("bia", "sys01"): "platinum"}
+    fresh_last_verified = (
+        (datetime.now(timezone.utc) - timedelta(days=10))
+        .strftime("%Y-%m-%dT%H:%M:%SZ")
+    )
+
+    tier_sla, expiry_rule, risk = _compute_tier_and_risk(
+        "bia",
+        "sys01",
+        last_verified=fresh_last_verified,
+        confidence="manual",
+        tiers=tiers,
+        assignments=assignments,
+    )
+
+    assert tier_sla == "platinum"
+    assert expiry_rule == "100 days"
+    assert risk == "low"
+
+
+def test_compute_tier_and_risk_malformed_last_verified_degrades_to_unknown() -> None:
+    """Patch 1: a malformed/hand-edited `last_verified` timestamp degrades
+    to risk="unknown" (AD-8 graceful degradation) rather than raising
+    ValueError from the internal `datetime.strptime` parse.
+    """
+    tiers = {"platinum": 100}
+    assignments = {("bia", "sys01"): "platinum"}
+
+    tier_sla, expiry_rule, risk = _compute_tier_and_risk(
+        "bia",
+        "sys01",
+        last_verified="not-a-valid-timestamp",
+        confidence="agent-verified",
+        tiers=tiers,
+        assignments=assignments,
+    )
+
+    assert tier_sla == "platinum"
+    assert expiry_rule == "100 days"
+    assert risk == "unknown"
+
+
+def test_get_record_malformed_last_verified_timestamp_in_log_degrades_to_unknown(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """End-to-end version of Patch 1's regression: a hand-edited log line
+    with a malformed timestamp must degrade `get_record`'s `risk` to
+    "unknown" rather than raising -- proving the fail-open discipline holds
+    through the real read path, not just against `_compute_tier_and_risk`
+    called directly.
+    """
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 100\nassign.bia/sys01: platinum\n"
+    )
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "bia.log.md").write_text(
+        "- (rawfact) not-a-valid-timestamp source=synthetic:test "
+        'artifact=bia/sys01 fields={"observed": "value"}\n',
+        encoding="utf-8",
+    )
+
+    record = get_record("bia", "sys01", ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert record.tier_sla == "platinum"
+    assert record.expiry_rule == "100 days"
+    assert record.risk == "unknown"
+
+
+# --- I/O matrix row: missing rezops.tiers.yaml ------------------------------
+
+
+def test_get_record_missing_tiers_file_resolves_risk_unknown_never_raises(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    missing_tiers_path = tmp_path / "does_not_exist.yaml"
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "bia", "sys01", ledger_dir=ledger_dir, tiers_path=missing_tiers_path
+    )
+
+    assert record.tier_sla is None
+    assert record.expiry_rule is None
+    assert record.risk == "unknown"
+
+
+def test_list_records_missing_tiers_file_every_artifact_resolves_risk_unknown(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    missing_tiers_path = tmp_path / "does_not_exist.yaml"
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"observed": "v"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="runbooks",
+            artifact_id="sys02",
+            source="synthetic:test",
+            fields={"observed": "v"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(ledger_dir=ledger_dir, tiers_path=missing_tiers_path)
+
+    assert len(records) == 2
+    assert all(record.risk == "unknown" for record in records)
+    assert all(record.tier_sla is None for record in records)
+
+
+# --- Malformed config: assign line names an undeclared tier -----------------
+
+
+def test_get_record_raises_tiers_file_error_for_malformed_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(tmp_path, "assign.bia/sys01: nonexistent-tier\n")
+
+    with pytest.raises(TiersFileError):
+        get_record("bia", "sys01", ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+
+def test_list_records_raises_tiers_file_error_for_malformed_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(tmp_path, "assign.bia/sys01: nonexistent-tier\n")
+    append_event(
+        RawFact(
+            artifact_type="bia", artifact_id="sys01", source="synthetic:test", fields={}
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    with pytest.raises(TiersFileError):
+        list_records(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+
+# --- list_records and get_record agree for the same artifact ----------------
+
+
+def test_list_records_tier_and_risk_match_get_record_for_same_artifact(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 30\nassign.bia/sys01: platinum\n"
+    )
+    stale_timestamp = datetime.now(timezone.utc) - timedelta(days=45)
+    append_event(
+        RawFact(
+            artifact_type="bia",
+            artifact_id="sys01",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+        timestamp=stale_timestamp,
+    )
+
+    direct = get_record("bia", "sys01", ledger_dir=ledger_dir, tiers_path=tiers_path)
+    [listed] = list_records(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert listed.tier_sla == direct.tier_sla == "platinum"
+    assert listed.expiry_rule == direct.expiry_rule == "30 days"
+    assert listed.risk == direct.risk == "high"
+
+
+# --- MCP tool surface exposes the new `risk` key ----------------------------
+
+
+def test_ledger_get_record_tool_surfaces_risk_key(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_get_record("test_artifact", "x1"))
+
+    assert result.isError is False
+    assert result.structuredContent["risk"] == "unknown"
+    assert result.structuredContent["tier_sla"] is None
+    assert result.structuredContent["expiry_rule"] is None
+
+
+def test_ledger_list_records_tool_surfaces_risk_key(
+    ledger_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_artifact",
+            artifact_id="x1",
+            source="synthetic:test",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir)
+
+    result = asyncio.run(_call_ledger_list_records())
+
+    assert result.isError is False
+    [record] = result.structuredContent["result"]
+    assert record["risk"] == "unknown"
+    assert record["tier_sla"] is None
+
+
+# --- Acceptance: real dormant policy-engine path now fires ------------------
+
+
+def test_create_action_proposal_tier_sla_known_becomes_true_and_decision_is_automatic(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """Acceptance criterion (Story 17): an artifact with a declared tier
+    (via an isolated, test-owned `rezops.tiers.yaml` -- `create_action_proposal`'s
+    own `tiers_path` parameter, threaded into its internal `get_record` call,
+    so this test never depends on/mutates the real, git-committed
+    `rezops.tiers.yaml`), fresh `last_verified`, and `min_confidence=1.0`,
+    citing a low-impact action, makes `policy_decision="automatic"` -- Story
+    13's previously-dormant `tier_sla_known` branch actually firing against
+    real data for the first time. Also asserts the resulting `risk`, since
+    CAP-11 is framed around risk classification, not just tier_sla_known.
+    """
+    policy_path = tmp_path / "rezops.policy.yaml"
+    policy_path.write_text("create_ticket:\n  impact: low\n", encoding="utf-8")
+
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\nassign.bia/payments-checkout: platinum\n",
+    )
+
+    fresh_timestamp = datetime.now(timezone.utc) - timedelta(days=1)
+    fact = RawFact(
+        artifact_type="bia",
+        artifact_id="payments-checkout",
+        source="synthetic:story17-fresh",
+        fields={"observed": "value"},
+    )
+    append_event(fact, ledger_dir=ledger_dir, timestamp=fresh_timestamp)
+
+    bundle = create_evidence_bundle(
+        claim="payments-checkout BIA looks current",
+        reasoning="freshly observed fact resolves this citation",
+        evidence=(
+            EvidenceRef(
+                artifact_type="bia",
+                artifact_id="payments-checkout",
+                source="synthetic:story17-fresh",
+            ),
+        ),
+        ledger_dir=ledger_dir,
+    )
+    assert bundle.confidence == 1.0
+
+    # Sanity check: the target's tier_sla is genuinely known now, via the
+    # isolated tiers fixture -- the exact precondition this acceptance
+    # criterion is about.
+    target_record = get_record(
+        "bia", "payments-checkout", ledger_dir=ledger_dir, tiers_path=tiers_path
+    )
+    assert target_record.tier_sla == "platinum"
+    assert target_record.risk == "low"
+
+    proposal = create_action_proposal(
+        action="create_ticket",
+        target_artifact_type="bia",
+        target_artifact_id="payments-checkout",
+        reason="verify BIA is current",
+        evidence=[bundle.evidence_id],
+        ledger_dir=ledger_dir,
+        policy_path=policy_path,
+        tiers_path=tiers_path,
+    )
+
+    assert proposal.impact == "low"
+    assert proposal.policy_decision == "automatic"
+
+    # The target's risk, resolved the same way create_action_proposal itself
+    # resolved tier_sla_known, is "low" -- fresh (1 day old) against a
+    # 30-day platinum expiry window (CAP-11's risk classification, not just
+    # tier_sla_known).
+    record_after = get_record(
+        "bia", "payments-checkout", ledger_dir=ledger_dir, tiers_path=tiers_path
+    )
+    assert record_after.risk == "low"
+
+
+# --- Story 18 (CAP-4): DR readiness summary --------------------------------
+#
+# `get_dr_readiness_summary` aggregates risk counts + an overall status per
+# tier declared in `rezops.tiers.yaml`, calling `projection.get_record` for
+# every assigned artifact -- never a parallel reimplementation of Story 17's
+# frozen risk formula.
+
+
+def _append_fact_days_ago(
+    ledger_dir: Path,
+    *,
+    artifact_type: str,
+    artifact_id: str,
+    days_ago: int,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type=artifact_type,
+            artifact_id=artifact_id,
+            source="synthetic:story18",
+            fields={"observed": "value"},
+        ),
+        ledger_dir=ledger_dir,
+        timestamp=datetime.now(timezone.utc) - timedelta(days=days_ago),
+    )
+
+
+# --- I/O matrix row: multiple tiers, mixed risk -----------------------------
+
+
+def test_dr_readiness_multiple_tiers_mixed_risk_one_row_per_tier(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        "tier.gold.expiry_days: 90\n"
+        "tier.silver.expiry_days: 10\n"
+        "assign.bia/sys-high: platinum\n"
+        "assign.bia/sys-low: platinum\n"
+        "assign.runbooks/sys-medium: gold\n",
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-high", days_ago=45
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-low", days_ago=1
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="runbooks", artifact_id="sys-medium", days_ago=80
+    )
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert isinstance(summary, DrReadinessSummary)
+    by_name = {tier.name: tier for tier in summary.tiers}
+    assert set(by_name) == {"platinum", "gold", "silver"}
+
+    platinum = by_name["platinum"]
+    assert platinum.artifact_count == 2
+    assert platinum.risk_counts == {
+        "high": 1,
+        "medium": 0,
+        "low": 1,
+        "unknown": 0,
+    }
+    assert platinum.status == "high"
+
+    gold = by_name["gold"]
+    assert gold.artifact_count == 1
+    assert gold.risk_counts == {"high": 0, "medium": 1, "low": 0, "unknown": 0}
+    assert gold.status == "medium"
+
+    silver = by_name["silver"]
+    assert silver.artifact_count == 0
+    assert silver.risk_counts == {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    assert silver.status == "low"
+
+
+# --- I/O matrix row: tier with a high-risk artifact -------------------------
+
+
+def test_dr_readiness_high_risk_artifact_status_high_regardless_of_low_medium(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        "assign.bia/sys-low: platinum\n"
+        "assign.bia/sys-high: platinum\n"
+        "assign.runbooks/sys-low2: platinum\n",
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-low", days_ago=1
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-high", days_ago=60
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="runbooks", artifact_id="sys-low2", days_ago=2
+    )
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    [platinum] = summary.tiers
+    assert platinum.risk_counts["high"] == 1
+    assert platinum.risk_counts["low"] == 2
+    assert platinum.status == "high"
+
+
+# --- I/O matrix row: tier with only unknown-risk artifacts ------------------
+
+
+def test_dr_readiness_only_unknown_risk_status_unknown_ranks_above_low(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.gold.expiry_days: 90\n"
+        "assign.bia/sys-never-observed: gold\n"
+        "assign.runbooks/sys-never-observed2: gold\n",
+    )
+    # Neither artifact is ever observed -- both resolve confidence="unknown",
+    # so risk="unknown" (never a guess).
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    [gold] = summary.tiers
+    assert gold.artifact_count == 2
+    assert gold.risk_counts == {"high": 0, "medium": 0, "low": 0, "unknown": 2}
+    assert gold.status == "unknown"
+
+
+# --- I/O matrix row: tier declared but unassigned ---------------------------
+
+
+def test_dr_readiness_tier_declared_but_unassigned_zero_counts_status_low(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(tmp_path, "tier.gold.expiry_days: 90\n")
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    [gold] = summary.tiers
+    assert gold.name == "gold"
+    assert gold.artifact_count == 0
+    assert gold.risk_counts == {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    assert gold.status == "low"
+
+
+# --- I/O matrix row: no rezops.tiers.yaml -----------------------------------
+
+
+def test_dr_readiness_missing_tiers_file_returns_empty_tiers(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    missing_tiers_path = tmp_path / "does_not_exist.yaml"
+
+    summary = get_dr_readiness_summary(
+        ledger_dir=ledger_dir, tiers_path=missing_tiers_path
+    )
+
+    assert summary.tiers == ()
+    _assert_generated_at_is_utc_timestamp(summary.generated_at)
+
+
+# --- Malformed config: get_dr_readiness_summary still raises TiersFileError -
+
+
+def test_get_dr_readiness_summary_raises_tiers_file_error_for_malformed_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """Unlike a missing `rezops.tiers.yaml` (never raises), a malformed one
+    (here, an assignment naming an undeclared tier) still raises
+    `TiersFileError` via the initial `load_tiers` call -- consistent with
+    Story 17's own fail-loudly-on-malformed-config design.
+    """
+    tiers_path = _write_tiers_file(tmp_path, "assign.bia/sys01: nonexistent-tier\n")
+
+    with pytest.raises(TiersFileError):
+        get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+
+# --- I/O matrix row: empty ledger -------------------------------------------
+
+
+def test_dr_readiness_empty_ledger_every_tier_artifact_count_zero_never_raises(
+    tmp_path: Path,
+) -> None:
+    empty_ledger_dir = tmp_path / "ledger_data"
+    assert not empty_ledger_dir.exists()
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        "assign.bia/sys01: platinum\n"
+        "assign.runbooks/sys02: platinum\n",
+    )
+
+    summary = get_dr_readiness_summary(
+        ledger_dir=empty_ledger_dir, tiers_path=tiers_path
+    )
+
+    [platinum] = summary.tiers
+    # No log files exist at all -- both artifacts resolve confidence/risk
+    # "unknown" via get_record's own missing-log tolerance, not raising.
+    assert platinum.artifact_count == 2
+    assert platinum.risk_counts == {"high": 0, "medium": 0, "low": 0, "unknown": 2}
+    assert platinum.status == "unknown"
+    assert not empty_ledger_dir.exists()
+
+
+# --- Determinism: tiers sorted alphabetically by name -----------------------
+
+
+def test_dr_readiness_tiers_sorted_alphabetically_by_name(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.silver.expiry_days: 10\n"
+        "tier.platinum.expiry_days: 30\n"
+        "tier.gold.expiry_days: 90\n",
+    )
+
+    summary = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    assert [tier.name for tier in summary.tiers] == ["gold", "platinum", "silver"]
+
+
+# --- get_dr_readiness_summary performs no mutation --------------------------
+
+
+def test_get_dr_readiness_summary_writes_nothing(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 30\nassign.bia/sys01: platinum\n"
+    )
+    _append_fact_days_ago(ledger_dir, artifact_type="bia", artifact_id="sys01", days_ago=1)
+    before_ledger = {
+        path.name: path.read_bytes()
+        for path in sorted(ledger_dir.rglob("*"))
+        if path.is_file()
+    }
+    before_tiers = tiers_path.read_bytes()
+
+    get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+
+    after_ledger = {
+        path.name: path.read_bytes()
+        for path in sorted(ledger_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert before_ledger == after_ledger
+    assert tiers_path.read_bytes() == before_tiers
+
+
+# --- ledger_get_dr_readiness_summary MCP tool -------------------------------
+
+
+async def _call_ledger_get_dr_readiness_summary():
+    async with create_connected_server_and_client_session(mcp) as client:
+        return await client.call_tool("ledger_get_dr_readiness_summary", {})
+
+
+def test_ledger_get_dr_readiness_summary_tool_matches_direct_call(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tiers_path = _write_tiers_file(
+        tmp_path,
+        "tier.platinum.expiry_days: 30\n"
+        "assign.bia/sys-high: platinum\n"
+        "assign.bia/sys-low: platinum\n",
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-high", days_ago=45
+    )
+    _append_fact_days_ago(
+        ledger_dir, artifact_type="bia", artifact_id="sys-low", days_ago=1
+    )
+    _point_server_at(monkeypatch, ledger_dir, tiers_path=tiers_path)
+
+    result = asyncio.run(_call_ledger_get_dr_readiness_summary())
+
+    assert result.isError is False
+    expected = get_dr_readiness_summary(ledger_dir=ledger_dir, tiers_path=tiers_path)
+    assert result.structuredContent == {
+        "tiers": [
+            {
+                "name": tier.name,
+                "artifact_count": tier.artifact_count,
+                "risk_counts": dict(tier.risk_counts),
+                "status": tier.status,
+            }
+            for tier in expected.tiers
+        ],
+        "generated_at": expected.generated_at,
+    }
+
+
+def test_ledger_get_dr_readiness_summary_tool_missing_tiers_file_never_raises(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing_tiers_path = tmp_path / "does_not_exist.yaml"
+    _point_server_at(monkeypatch, ledger_dir, tiers_path=missing_tiers_path)
+
+    result = asyncio.run(_call_ledger_get_dr_readiness_summary())
+
+    assert result.isError is False
+    assert result.structuredContent["tiers"] == []
+    assert result.structuredContent["generated_at"]
+
+
+def test_ledger_get_dr_readiness_summary_tool_malformed_tiers_file_surfaces_structured_error(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed `rezops.tiers.yaml` (here, an assignment naming an
+    undeclared tier) makes the underlying `TiersFileError` propagate through
+    the MCP tool the same way other typed exceptions already do for other
+    tools -- surfaced as a structured error (`isError` True), not silently
+    swallowed and not a crash.
+    """
+    tiers_path = _write_tiers_file(tmp_path, "assign.bia/sys01: nonexistent-tier\n")
+    _point_server_at(monkeypatch, ledger_dir, tiers_path=tiers_path)
+
+    result = asyncio.run(_call_ledger_get_dr_readiness_summary())
+
+    assert result.isError is True
+    assert result.content
+    assert "nonexistent-tier" in result.content[0].text
+
+
+def test_ledger_get_dr_readiness_summary_tool_performs_no_write(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Acceptance criterion: the tool issues no write of any kind -- calling
+    it never creates `ledger_dir` or any file inside it.
+    """
+    tiers_path = _write_tiers_file(
+        tmp_path, "tier.platinum.expiry_days: 30\nassign.bia/sys01: platinum\n"
+    )
+    assert not ledger_dir.exists()
+    _point_server_at(monkeypatch, ledger_dir, tiers_path=tiers_path)
+
+    result = asyncio.run(_call_ledger_get_dr_readiness_summary())
+
+    assert result.isError is False
+    assert not ledger_dir.exists()
+
+
+# --- Story 19 (CAP-12): DR test achievement signals -------------------------
+#
+# `rezops.testing_window.yaml` declares the annual testing window (Story 19's
+# own hand-rolled parser, mirroring `load_tiers`'s discipline). `get_record`/
+# `list_records` compute `rto_achieved_pct`/`rpo_achieved_pct` from whatever
+# rto/rpo target/actual fields are present on any artifact_type, and
+# `testing_window_compliance` from `test_date` x the declared window -- none
+# ever accepted as connector/caller input.
+
+
+def _write_testing_window_file(tmp_path: Path, content: str) -> Path:
+    path = tmp_path / "rezops.testing_window.yaml"
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+# --- load_testing_window: parsing -------------------------------------------
+
+
+def test_load_testing_window_returns_none_when_file_does_not_exist(
+    tmp_path: Path,
+) -> None:
+    assert load_testing_window(tmp_path / "does_not_exist.yaml") is None
+
+
+def test_load_testing_window_parses_start_and_end(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-15\nwindow_end: 03-31\n"
+    )
+    assert load_testing_window(window_path) == ((1, 15), (3, 31))
+
+
+def test_load_testing_window_order_independent(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_end: 03-31\nwindow_start: 01-15\n"
+    )
+    assert load_testing_window(window_path) == ((1, 15), (3, 31))
+
+
+def test_load_testing_window_ignores_blank_lines_and_comments(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path,
+        "# annual DR testing window\n\nwindow_start: 11-01\n\n"
+        "# wraps the year boundary\nwindow_end: 02-28\n",
+    )
+    assert load_testing_window(window_path) == ((11, 1), (2, 28))
+
+
+def test_load_testing_window_rejects_unparseable_line(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(tmp_path, "not a valid line at all\n")
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_load_testing_window_rejects_duplicate_declaration(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_start: 02-01\nwindow_end: 03-01\n"
+    )
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_load_testing_window_rejects_missing_window_end(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(tmp_path, "window_start: 01-01\n")
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_load_testing_window_rejects_missing_window_start(tmp_path: Path) -> None:
+    window_path = _write_testing_window_file(tmp_path, "window_end: 01-01\n")
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+@pytest.mark.parametrize("bad_date", ["13-01", "01-32", "00-15", "02-30"])
+def test_load_testing_window_rejects_invalid_month_or_day(
+    tmp_path: Path, bad_date: str
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, f"window_start: {bad_date}\nwindow_end: 03-31\n"
+    )
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_load_testing_window_rejects_february_29_leap_day(tmp_path: Path) -> None:
+    """`MM-DD` has no year, so a `02-29` declaration is always rejected --
+    there is no way to know whether the declaring year was a leap year, and
+    accepting it would make the window silently invalid three years out of
+    four.
+    """
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 02-29\n"
+    )
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+@pytest.mark.parametrize(
+    "content",
+    ["", "\n\n", "# annual DR testing window\n# nothing declared yet\n\n"],
+)
+def test_load_testing_window_raises_for_empty_or_comment_only_file(
+    tmp_path: Path, content: str
+) -> None:
+    """A `rezops.testing_window.yaml` that *exists* but declares neither
+    `window_start` nor `window_end` (empty, or comments/blank lines only) is
+    not exactly two valid `MM-DD` lines -- the same "malformed, fails
+    loudly" treatment as declaring only one of the two (see the
+    `rejects_missing_window_*` tests above), never silently equivalent to a
+    missing file. Only a file that doesn't exist at all resolves `None`.
+    """
+    window_path = _write_testing_window_file(tmp_path, content)
+    with pytest.raises(TestingWindowFileError):
+        load_testing_window(window_path)
+
+
+def test_get_record_raises_testing_window_file_error_for_empty_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(tmp_path, "# no window declared\n")
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-02-14"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    with pytest.raises(TestingWindowFileError):
+        get_record(
+            "test_records",
+            "payments-checkout",
+            ledger_dir=ledger_dir,
+            testing_window_path=window_path,
+        )
+
+
+# --- I/O matrix row: recovered within target --------------------------------
+
+
+def test_compute_test_achievement_recovered_within_target_caps_at_100() -> None:
+    rto_pct, rpo_pct = _compute_test_achievement(
+        {"rto_target_minutes": 60, "rto_actual_minutes": 45}
+    )
+    assert rto_pct == 100.0
+    assert rpo_pct is None
+
+
+# --- I/O matrix row: recovered slower than target ---------------------------
+
+
+def test_compute_test_achievement_recovered_slower_than_target() -> None:
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": 70, "rto_actual_minutes": 100}
+    )
+    assert rto_pct == 70.0
+
+
+def test_compute_test_achievement_rpo_computed_independently_of_rto() -> None:
+    rto_pct, rpo_pct = _compute_test_achievement(
+        {
+            "rto_target_minutes": 70,
+            "rto_actual_minutes": 100,
+            "rpo_target_minutes": 30,
+            "rpo_actual_minutes": 20,
+        }
+    )
+    assert rto_pct == 70.0
+    assert rpo_pct == 100.0
+
+
+# --- I/O matrix row: missing actual/target field ----------------------------
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"rto_target_minutes": 60},
+        {"rto_actual_minutes": 45},
+        {},
+    ],
+)
+def test_compute_test_achievement_missing_pair_member_resolves_none(
+    fields: dict,
+) -> None:
+    rto_pct, rpo_pct = _compute_test_achievement(fields)
+    assert rto_pct is None
+    assert rpo_pct is None
+
+
+# --- I/O matrix row: non-numeric or non-positive target/actual -------------
+
+
+@pytest.mark.parametrize(
+    "actual",
+    [0, -5, "45", True, False, None],
+)
+def test_compute_test_achievement_non_numeric_or_non_positive_actual_resolves_none(
+    actual: object,
+) -> None:
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": 60, "rto_actual_minutes": actual}
+    )
+    assert rto_pct is None
+
+
+@pytest.mark.parametrize(
+    "target",
+    [0, -5, "60", True, False, None],
+)
+def test_compute_test_achievement_non_numeric_or_non_positive_target_resolves_none(
+    target: object,
+) -> None:
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": target, "rto_actual_minutes": 45}
+    )
+    assert rto_pct is None
+
+
+def test_compute_test_achievement_bool_true_target_and_actual_resolves_none() -> None:
+    """`bool` is an `int` subclass in Python -- `True`/`False` must still be
+    rejected explicitly, not accidentally accepted as `1`/`0`.
+    """
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": True, "rto_actual_minutes": True}
+    )
+    assert rto_pct is None
+
+
+def test_compute_test_achievement_float_values_accepted() -> None:
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": 60.0, "rto_actual_minutes": 45.5}
+    )
+    assert rto_pct == pytest.approx(min(100.0, (60.0 / 45.5) * 100))
+
+
+# --- I/O matrix row: non-finite target/actual -------------------------------
+
+
+@pytest.mark.parametrize(
+    "target,actual",
+    [
+        (float("inf"), float("inf")),
+        (float("inf"), 45),
+        (60, float("inf")),
+        (float("nan"), 45),
+        (60, float("nan")),
+        (float("nan"), float("nan")),
+    ],
+)
+def test_compute_test_achievement_non_finite_target_or_actual_resolves_none(
+    target: float, actual: float
+) -> None:
+    """`float("inf")` as both `target` and `actual` would otherwise produce an
+    undefined `inf/inf` ratio that `min()` silently resolves to a false
+    `100.0` "fully achieved" -- non-finite values must resolve to `None`
+    instead, never raise, never guess.
+    """
+    rto_pct, _ = _compute_test_achievement(
+        {"rto_target_minutes": target, "rto_actual_minutes": actual}
+    )
+    assert rto_pct is None
+
+
+# --- _compute_testing_window_compliance -------------------------------------
+
+
+def test_compute_testing_window_compliance_inside_window_is_compliant() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-02-14"}, window)
+        == "compliant"
+    )
+
+
+def test_compute_testing_window_compliance_outside_window_is_non_compliant() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-06-01"}, window)
+        == "non_compliant"
+    )
+
+
+def test_compute_testing_window_compliance_wraps_year_boundary_is_compliant() -> None:
+    """Window wraps a year boundary (`window_start=11-01`, `window_end=02-28`)
+    -- a test_date in December falls inside it.
+    """
+    window = ((11, 1), (2, 28))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-12-15"}, window)
+        == "compliant"
+    )
+
+
+def test_compute_testing_window_compliance_wraps_year_boundary_january_is_compliant() -> (
+    None
+):
+    window = ((11, 1), (2, 28))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-01-10"}, window)
+        == "compliant"
+    )
+
+
+def test_compute_testing_window_compliance_wraps_year_boundary_summer_is_non_compliant() -> (
+    None
+):
+    window = ((11, 1), (2, 28))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-07-01"}, window)
+        == "non_compliant"
+    )
+
+
+def test_compute_testing_window_compliance_missing_test_date_is_unknown() -> None:
+    window = ((1, 1), (3, 31))
+    assert _compute_testing_window_compliance({}, window) == "unknown"
+
+
+def test_compute_testing_window_compliance_non_string_test_date_is_unknown() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": 20260214}, window) == "unknown"
+    )
+
+
+def test_compute_testing_window_compliance_unparseable_test_date_is_unknown() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": "not-a-date"}, window)
+        == "unknown"
+    )
+
+
+def test_compute_testing_window_compliance_wrong_format_test_date_is_unknown() -> None:
+    window = ((1, 1), (3, 31))
+    assert (
+        _compute_testing_window_compliance({"test_date": "02/14/2026"}, window)
+        == "unknown"
+    )
+
+
+def test_compute_testing_window_compliance_missing_window_is_unknown() -> None:
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-02-14"}, None)
+        == "unknown"
+    )
+
+
+def test_compute_testing_window_compliance_single_day_window_exact_day_is_compliant() -> (
+    None
+):
+    """`window_start == window_end` (e.g. both `06-15`) is a valid edge of
+    the `start <= end` branch: a `test_date` of exactly that day is
+    compliant.
+    """
+    window = ((6, 15), (6, 15))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-06-15"}, window)
+        == "compliant"
+    )
+
+
+def test_compute_testing_window_compliance_single_day_window_other_day_is_non_compliant() -> (
+    None
+):
+    window = ((6, 15), (6, 15))
+    assert (
+        _compute_testing_window_compliance({"test_date": "2026-06-16"}, window)
+        == "non_compliant"
+    )
+
+
+# --- get_record wiring: rto/rpo achieved pct --------------------------------
+
+
+def test_get_record_rto_achieved_pct_wired_from_folded_fields(
+    ledger_dir: Path,
+) -> None:
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"rto_target_minutes": 70, "rto_actual_minutes": 100},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records", "payments-checkout", ledger_dir=ledger_dir
+    )
+
+    assert record.rto_achieved_pct == 70.0
+    assert record.rpo_achieved_pct is None
+
+
+def test_get_record_computes_achievement_generically_for_any_artifact_type(
+    ledger_dir: Path,
+) -> None:
+    """Genericity: the achieved-percentage computation is not hardcoded to a
+    "test_records" artifact_type -- any artifact_type carrying the raw
+    rto/rpo fields gets the same computation.
+    """
+    append_event(
+        RawFact(
+            artifact_type="some_other_artifact_type",
+            artifact_id="anything",
+            source="synthetic:test",
+            fields={"rpo_target_minutes": 30, "rpo_actual_minutes": 15},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "some_other_artifact_type", "anything", ledger_dir=ledger_dir
+    )
+
+    assert record.rto_achieved_pct is None
+    assert record.rpo_achieved_pct == 100.0
+
+
+def test_get_record_never_observed_artifact_achievement_and_compliance_are_none_unknown(
+    ledger_dir: Path,
+) -> None:
+    record = get_record("test_records", "never-observed", ledger_dir=ledger_dir)
+
+    assert record.rto_achieved_pct is None
+    assert record.rpo_achieved_pct is None
+    assert record.testing_window_compliance == "unknown"
+
+
+# --- get_record wiring: testing_window_compliance ---------------------------
+
+
+def test_get_record_testing_window_compliance_wired_compliant(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-02-14"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "payments-checkout",
+        ledger_dir=ledger_dir,
+        testing_window_path=window_path,
+    )
+
+    assert record.testing_window_compliance == "compliant"
+
+
+def test_get_record_testing_window_compliance_wired_non_compliant(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-08-01"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "payments-checkout",
+        ledger_dir=ledger_dir,
+        testing_window_path=window_path,
+    )
+
+    assert record.testing_window_compliance == "non_compliant"
+
+
+def test_get_record_testing_window_compliance_wraps_year_boundary_via_ledger_get_record(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """Acceptance criterion (Story 19): a `test_date` in December and a
+    window declared `11-01`..`02-28` resolves `testing_window_compliance=
+    "compliant"` -- proving the wraparound case works end-to-end through
+    `get_record`.
+    """
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 11-01\nwindow_end: 02-28\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-12-15"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "payments-checkout",
+        ledger_dir=ledger_dir,
+        testing_window_path=window_path,
+    )
+
+    assert record.testing_window_compliance == "compliant"
+
+
+def test_get_record_missing_testing_window_file_resolves_unknown_never_raises(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    missing_window_path = tmp_path / "does_not_exist.yaml"
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-02-14"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "payments-checkout",
+        ledger_dir=ledger_dir,
+        testing_window_path=missing_window_path,
+    )
+
+    assert record.testing_window_compliance == "unknown"
+
+
+def test_get_record_raises_testing_window_file_error_for_malformed_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(tmp_path, "window_start: 01-01\n")
+
+    with pytest.raises(TestingWindowFileError):
+        get_record(
+            "test_records",
+            "payments-checkout",
+            ledger_dir=ledger_dir,
+            testing_window_path=window_path,
+        )
+
+
+# --- list_records wiring: rto/rpo achieved pct + testing_window_compliance --
+
+
+def test_list_records_computes_achievement_and_compliance_per_record(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={
+                "rto_target_minutes": 70,
+                "rto_actual_minutes": 100,
+                "test_date": "2026-02-14",
+            },
+        ),
+        ledger_dir=ledger_dir,
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="network-core",
+            source="synthetic:test",
+            fields={
+                "rpo_target_minutes": 30,
+                "rpo_actual_minutes": 20,
+                "test_date": "2026-08-01",
+            },
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    records = list_records(
+        artifact_type="test_records",
+        ledger_dir=ledger_dir,
+        testing_window_path=window_path,
+    )
+
+    by_id = {record.artifact_id: record for record in records}
+    assert by_id["payments-checkout"].rto_achieved_pct == 70.0
+    assert by_id["payments-checkout"].testing_window_compliance == "compliant"
+    assert by_id["network-core"].rpo_achieved_pct == 100.0
+    assert by_id["network-core"].testing_window_compliance == "non_compliant"
+
+
+def test_list_records_missing_testing_window_file_every_record_resolves_unknown(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    missing_window_path = tmp_path / "does_not_exist.yaml"
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"test_date": "2026-02-14"},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    [record] = list_records(
+        artifact_type="test_records",
+        ledger_dir=ledger_dir,
+        testing_window_path=missing_window_path,
+    )
+
+    assert record.testing_window_compliance == "unknown"
+
+
+def test_list_records_raises_testing_window_file_error_for_malformed_config(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    window_path = _write_testing_window_file(tmp_path, "window_start: 01-01\n")
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    with pytest.raises(TestingWindowFileError):
+        list_records(
+            artifact_type="test_records",
+            ledger_dir=ledger_dir,
+            testing_window_path=window_path,
+        )
+
+
+def test_list_records_corrupted_type_sentinel_has_none_achievement_and_unknown_compliance(
+    ledger_dir: Path,
+) -> None:
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "broken_type.log.md").write_text(
+        "this is not a valid event log line at all\n", encoding="utf-8"
+    )
+
+    [sentinel] = list_records(artifact_type="broken_type", ledger_dir=ledger_dir)
+
+    assert sentinel.artifact_id == LOG_FORMAT_ERROR_ARTIFACT_ID
+    assert sentinel.rto_achieved_pct is None
+    assert sentinel.rpo_achieved_pct is None
+    assert sentinel.testing_window_compliance == "unknown"
+
+
+# --- I/O matrix row: RawFact rejects a computed field at construction ------
+
+
+def test_rawfact_with_testing_window_compliance_field_raises_before_appending(
+    ledger_dir: Path,
+) -> None:
+    with pytest.raises(SchemaValidationError):
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={"testing_window_compliance": "compliant"},
+        )
+
+    assert read_events("test_records", ledger_dir=ledger_dir) == []
+    assert not (ledger_dir / "test_records.log.md").exists()
+
+
+# --- MCP tool surface: ledger_get_record / ledger_list_records expose the ---
+# --- three new keys ----------------------------------------------------------
+
+
+def test_ledger_get_record_tool_surfaces_rto_rpo_and_testing_window_compliance(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={
+                "rto_target_minutes": 70,
+                "rto_actual_minutes": 100,
+                "test_date": "2026-02-14",
+            },
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir, testing_window_path=window_path)
+
+    result = asyncio.run(
+        _call_ledger_get_record("test_records", "payments-checkout")
+    )
+
+    assert result.isError is False
+    assert result.structuredContent["rto_achieved_pct"] == 70.0
+    assert result.structuredContent["rpo_achieved_pct"] is None
+    assert result.structuredContent["testing_window_compliance"] == "compliant"
+
+
+def test_ledger_list_records_tool_surfaces_rto_rpo_and_testing_window_compliance(
+    ledger_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window_path = _write_testing_window_file(
+        tmp_path, "window_start: 01-01\nwindow_end: 03-31\n"
+    )
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="payments-checkout",
+            source="synthetic:test",
+            fields={
+                "rpo_target_minutes": 30,
+                "rpo_actual_minutes": 20,
+                "test_date": "2026-08-01",
+            },
+        ),
+        ledger_dir=ledger_dir,
+    )
+    _point_server_at(monkeypatch, ledger_dir, testing_window_path=window_path)
+
+    result = asyncio.run(_call_ledger_list_records())
+
+    assert result.isError is False
+    [record] = result.structuredContent["result"]
+    assert record["rto_achieved_pct"] is None
+    assert record["rpo_achieved_pct"] == 100.0
+    assert record["testing_window_compliance"] == "non_compliant"
+
+
+# --- Independence from Story 17/18 -------------------------------------------
+
+
+def test_achieved_pct_computation_independent_of_tier_sla(
+    ledger_dir: Path, tmp_path: Path
+) -> None:
+    """Story 19 is fully independent of Story 17/18: an artifact with no
+    declared tier (tier_sla=None, risk="unknown") still gets its
+    rto_achieved_pct computed correctly.
+    """
+    missing_tiers_path = tmp_path / "does_not_exist_tiers.yaml"
+    append_event(
+        RawFact(
+            artifact_type="test_records",
+            artifact_id="undeclared-tier-artifact",
+            source="synthetic:test",
+            fields={"rto_target_minutes": 60, "rto_actual_minutes": 45},
+        ),
+        ledger_dir=ledger_dir,
+    )
+
+    record = get_record(
+        "test_records",
+        "undeclared-tier-artifact",
+        ledger_dir=ledger_dir,
+        tiers_path=missing_tiers_path,
+    )
+
+    assert record.tier_sla is None
+    assert record.risk == "unknown"
+    assert record.rto_achieved_pct == 100.0

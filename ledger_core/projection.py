@@ -8,12 +8,16 @@ log(s) from disk.
 
 from __future__ import annotations
 
+import math
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ledger_core.log import (
     DEFAULT_LEDGER_DATA_DIR,
     RAWFACT_EVENT_TYPE,
+    TIMESTAMP_FORMAT,
     LogFormatError,
     read_events,
 )
@@ -38,6 +42,376 @@ LOG_FORMAT_ERROR_MARKER = "error:log_format_error"
 #: convention the way `artifact_type` filenames are, so this is just a
 #: human-legible marker, not a second exclusion mechanism.
 LOG_FORMAT_ERROR_ARTIFACT_ID = "_log_format_error"
+
+#: Repo-root, git-tracked tier vocabulary + assignment config (Story 17,
+#: CAP-11) -- mirrors `ledger_core.action_proposals.DEFAULT_POLICY_PATH`'s
+#: role for `rezops.policy.yaml`. Callers may override for testing so no
+#: test ever depends on -- or mutates -- the real, git-committed
+#: `rezops.tiers.yaml`.
+DEFAULT_TIERS_PATH = Path("rezops.tiers.yaml")
+
+#: Repo-root, git-tracked annual DR testing-window config (Story 19,
+#: CAP-12) -- mirrors `DEFAULT_TIERS_PATH`'s role for `rezops.tiers.yaml`.
+#: Callers may override for testing so no test ever depends on -- or
+#: mutates -- the real, git-committed `rezops.testing_window.yaml`.
+DEFAULT_TESTING_WINDOW_PATH = Path("rezops.testing_window.yaml")
+
+#: The medium-risk threshold as a fraction of a tier's `expiry_days`: past
+#: this fraction (but not yet past the full window) is "medium" (Story 17's
+#: own simple, defensible choice -- see the story's Design Notes; not
+#: derived from any external source).
+_MEDIUM_RISK_THRESHOLD_FRACTION = 0.75
+
+#: A `tier.<name>.expiry_days: <int>` declaration line in `rezops.tiers.yaml`.
+_TIER_DECLARATION_RE = re.compile(r"^tier\.([A-Za-z0-9_-]+)\.expiry_days:\s*(\S+)\s*$")
+
+#: An `assign.<artifact_type>/<artifact_id>: <tier name>` assignment line in
+#: `rezops.tiers.yaml`. `artifact_type`/`artifact_id` reuse the same
+#: identifier charset every other component in this project enforces
+#: (`shared.ledger_schema.models._IDENTIFIER_RE`, mirrored -- not imported --
+#: the same way `action_proposals.py` already mirrors it for its own
+#: `_IDENTIFIER_RE`).
+_TIER_ASSIGNMENT_RE = re.compile(
+    r"^assign\.([A-Za-z0-9_-]+)/([A-Za-z0-9_-]+):\s*(\S+)\s*$"
+)
+
+#: A `window_start: MM-DD` or `window_end: MM-DD` declaration line in
+#: `rezops.testing_window.yaml` (Story 19, CAP-12).
+_TESTING_WINDOW_LINE_RE = re.compile(r"^window_(start|end):\s*(\d{2})-(\d{2})\s*$")
+
+#: `test_date` RawFact field format (Story 19, CAP-12) -- an ISO `YYYY-MM-DD`
+#: string, parsed with `datetime.strptime` against this exact format.
+_TEST_DATE_FORMAT = "%Y-%m-%d"
+
+
+class TiersFileError(ValueError):
+    """Raised when `rezops.tiers.yaml` can't be parsed into the expected shape.
+
+    A config-file problem, not a caller-input problem -- mirrors
+    `ledger_core.action_proposals.PolicyFileError`: fails loudly rather than
+    silently letting a malformed declaration, or an `assign` line naming an
+    undeclared tier, through.
+    """
+
+
+def load_tiers(tiers_path: Path) -> tuple[dict[str, int], dict[tuple[str, str], str]]:
+    """Parse `rezops.tiers.yaml` into `(tiers, assignments)`.
+
+    `tiers` maps a declared tier name to its `expiry_days` (a positive int).
+    `assignments` maps `(artifact_type, artifact_id)` to the tier name
+    assigned to that one artifact. A hand-rolled parser for a deliberately
+    minimal, flat format -- mirrors `action_proposals._load_policy`'s own
+    "no PyYAML dependency" discipline: one `tier.<name>.expiry_days: <int>`
+    or `assign.<artifact_type>/<artifact_id>: <tier name>` line at a time,
+    blank lines and `#`-prefixed comment lines ignored anywhere.
+
+    Returns `({}, {})` -- never raises -- if `tiers_path` doesn't exist: no
+    tiers are declared, so every artifact correctly resolves `risk="unknown"`
+    rather than this function crashing on a config file that hasn't been
+    created yet (mirrors `_load_policy`'s identical missing-file behavior).
+
+    Raises `TiersFileError` -- fails loudly, never silently ignored -- for: a
+    duplicate `tier.<name>.expiry_days` declaration; a non-integer or
+    non-positive `expiry_days`; a duplicate `assign` entry for the same
+    artifact; an unparseable line; or an `assign` line naming a tier with no
+    matching `tier.<name>.expiry_days` declaration (checked only after the
+    whole file is read, so a tier declared later in the file is still
+    honored regardless of line order).
+    """
+    if not tiers_path.exists():
+        return {}, {}
+
+    text = tiers_path.read_text(encoding="utf-8")
+    tiers: dict[str, int] = {}
+    assignments: dict[tuple[str, str], str] = {}
+
+    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        tier_match = _TIER_DECLARATION_RE.match(line)
+        if tier_match:
+            name, days_text = tier_match.group(1), tier_match.group(2)
+            if name in tiers:
+                raise TiersFileError(
+                    f"{tiers_path}:{lineno}: duplicate tier declaration {name!r}"
+                )
+            try:
+                days = int(days_text)
+            except ValueError as exc:
+                raise TiersFileError(
+                    f"{tiers_path}:{lineno}: tier {name!r} expiry_days must be a "
+                    f"whole number of days; got {days_text!r}"
+                ) from exc
+            if days <= 0:
+                raise TiersFileError(
+                    f"{tiers_path}:{lineno}: tier {name!r} expiry_days must be "
+                    f"positive; got {days}"
+                )
+            tiers[name] = days
+            continue
+
+        assign_match = _TIER_ASSIGNMENT_RE.match(line)
+        if assign_match:
+            artifact_type, artifact_id, tier_name = assign_match.groups()
+            key = (artifact_type, artifact_id)
+            if key in assignments:
+                raise TiersFileError(
+                    f"{tiers_path}:{lineno}: duplicate assignment for "
+                    f"{artifact_type}/{artifact_id}"
+                )
+            assignments[key] = tier_name
+            continue
+
+        raise TiersFileError(f"{tiers_path}:{lineno}: unparseable tiers line: {line!r}")
+
+    undeclared = sorted({name for name in assignments.values() if name not in tiers})
+    if undeclared:
+        raise TiersFileError(
+            f"{tiers_path}: assignment(s) name undeclared tier(s) {undeclared!r} -- "
+            "every 'assign' line must name a tier already declared via a "
+            "'tier.<name>.expiry_days' line"
+        )
+
+    return tiers, assignments
+
+
+class TestingWindowFileError(ValueError):
+    """Raised when `rezops.testing_window.yaml` can't be parsed into the expected shape.
+
+    A config-file problem, not a caller-input problem -- mirrors
+    `TiersFileError`/`ledger_core.action_proposals.PolicyFileError`: fails
+    loudly rather than silently letting a malformed declaration through.
+    """
+
+
+def load_testing_window(
+    testing_window_path: Path,
+) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """Parse `rezops.testing_window.yaml` into `((start_month, start_day), (end_month, end_day))`.
+
+    A hand-rolled parser for a deliberately minimal, flat format -- mirrors
+    `load_tiers`'s own "no PyYAML dependency" discipline: blank lines and
+    `#`-prefixed comment lines are ignored anywhere, and the two declaration
+    lines (`window_start: MM-DD`, `window_end: MM-DD`) may appear in either
+    order.
+
+    Returns `None` -- never raises -- if `testing_window_path` doesn't exist:
+    no window is declared, so every artifact correctly resolves
+    `testing_window_compliance="unknown"` rather than this function crashing
+    on a config file that hasn't been created yet (mirrors `load_tiers`'s
+    identical missing-file behavior).
+
+    Raises `TestingWindowFileError` -- fails loudly, never silently ignored
+    -- for any existing file that isn't exactly two valid `MM-DD` lines: an
+    unparseable line, a duplicate declaration, an invalid month/day (e.g.
+    month 13, day 32, or February 30), or declaring zero or exactly one of
+    `window_start`/`window_end` (an empty/comment-only file included -- it
+    exists but is not exactly two valid lines, so it is malformed, not
+    equivalent to a missing file). Only declaring both lines, each a valid
+    `MM-DD` calendar date, parses successfully.
+    """
+    if not testing_window_path.exists():
+        return None
+
+    text = testing_window_path.read_text(encoding="utf-8")
+    values: dict[str, tuple[int, int]] = {}
+
+    for lineno, raw_line in enumerate(text.splitlines(), start=1):
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        match = _TESTING_WINDOW_LINE_RE.match(line)
+        if not match:
+            raise TestingWindowFileError(
+                f"{testing_window_path}:{lineno}: unparseable testing-window "
+                f"line: {line!r}"
+            )
+
+        key, month_text, day_text = match.groups()
+        if key in values:
+            raise TestingWindowFileError(
+                f"{testing_window_path}:{lineno}: duplicate window_{key} declaration"
+            )
+
+        month, day = int(month_text), int(day_text)
+        if not _is_valid_month_day(month, day):
+            raise TestingWindowFileError(
+                f"{testing_window_path}:{lineno}: window_{key} must be a valid "
+                f"MM-DD calendar date; got {month_text}-{day_text}"
+            )
+        values[key] = (month, day)
+
+    missing = sorted({"start", "end"} - values.keys())
+    if missing:
+        raise TestingWindowFileError(
+            f"{testing_window_path}: must declare exactly window_start and "
+            f"window_end lines; missing {[f'window_{name}' for name in missing]!r}"
+        )
+
+    return values["start"], values["end"]
+
+
+def _is_valid_month_day(month: int, day: int) -> bool:
+    """True iff `(month, day)` is a real calendar date in a non-leap year.
+
+    Deliberately checked against a non-leap year (`datetime(2001, ...)`) so
+    `02-29` is always rejected -- `MM-DD` has no year, so there is no way to
+    know whether the declaring year was a leap year, and accepting `02-29`
+    would make the declared window silently invalid three years out of four.
+    """
+    try:
+        datetime(2001, month, day)
+    except ValueError:
+        return False
+    return True
+
+
+def _compute_test_achievement(fields: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Compute `(rto_achieved_pct, rpo_achieved_pct)` from a folded artifact's fields (Story 19, CAP-12).
+
+    Identical formula applied independently to the RTO pair
+    (`rto_target_minutes`/`rto_actual_minutes`) and the RPO pair
+    (`rpo_target_minutes`/`rpo_actual_minutes`) via `_achieved_pct`: given a
+    numeric, non-bool, positive, finite `target` and `actual`,
+    `min(100.0, (target / actual) * 100)` -- capped at 100 because
+    recovering faster/tighter than target is still "fully achieved," never
+    "more than 100% achieved" (this story's own explicit choice -- see the
+    story's Design Notes). Any other case (either field missing, non-numeric,
+    `bool`, non-positive, or non-finite -- `float("inf")`/`float("nan")`,
+    which would otherwise make `target / actual` an undefined ratio that
+    `min()` could silently resolve to a false 100.0 "fully achieved")
+    resolves that pair to `None`, never raises, never guesses.
+    """
+    return (
+        _achieved_pct(fields.get("rto_target_minutes"), fields.get("rto_actual_minutes")),
+        _achieved_pct(fields.get("rpo_target_minutes"), fields.get("rpo_actual_minutes")),
+    )
+
+
+def _achieved_pct(target: Any, actual: Any) -> float | None:
+    if (
+        isinstance(target, (int, float))
+        and not isinstance(target, bool)
+        and isinstance(actual, (int, float))
+        and not isinstance(actual, bool)
+        and target > 0
+        and actual > 0
+        and math.isfinite(target)
+        and math.isfinite(actual)
+    ):
+        return min(100.0, (target / actual) * 100)
+    return None
+
+
+def _compute_testing_window_compliance(
+    fields: dict[str, Any],
+    window: tuple[tuple[int, int], tuple[int, int]] | None,
+) -> str:
+    """Compute `testing_window_compliance` from a folded artifact's `test_date` x the declared window (Story 19, CAP-12).
+
+    `"unknown"` if `window` is `None` (`rezops.testing_window.yaml` is
+    missing) or `test_date` is missing, non-string, or unparseable as
+    `YYYY-MM-DD` -- never raises. Otherwise, `test_date`'s `(month, day)` is
+    compared against the declared `(start, end)`: `"compliant"` if it falls
+    inside the window (accounting for a window that wraps across a year
+    boundary, i.e. `end < start`, e.g. `11-01`..`02-28`), else
+    `"non_compliant"`.
+    """
+    if window is None:
+        return "unknown"
+
+    test_date = fields.get("test_date")
+    if not isinstance(test_date, str):
+        return "unknown"
+    try:
+        parsed_date = datetime.strptime(test_date, _TEST_DATE_FORMAT)
+    except ValueError:
+        return "unknown"
+
+    month_day = (parsed_date.month, parsed_date.day)
+    start, end = window
+    if start <= end:
+        in_window = start <= month_day <= end
+    else:
+        # Wraps across a year boundary (e.g. 11-01..02-28): inside the
+        # window means on/after start OR on/before end, not between them.
+        in_window = month_day >= start or month_day <= end
+
+    return "compliant" if in_window else "non_compliant"
+
+
+def _compute_tier_and_risk(
+    artifact_type: str,
+    artifact_id: str,
+    *,
+    last_verified: str | None,
+    confidence: str,
+    tiers: dict[str, int],
+    assignments: dict[tuple[str, str], str],
+) -> tuple[str | None, str | None, str]:
+    """Compute `(tier_sla, expiry_rule, risk)` for one artifact (Story 17, CAP-11).
+
+    The frozen rule, applied identically wherever a `LedgerRecord` is built:
+
+    1. No `assign` entry for `(artifact_type, artifact_id)` -> no declared
+       tier -> `(None, None, "unknown")`. The most conservative reading,
+       never a guess (mirrors AD-10's escalate-rather-than-guess precedent).
+    2. A tier is declared: `tier_sla` is that tier's name, `expiry_rule` is
+       `f"{expiry_days} days"` -- both populated regardless of what follows.
+    3. If `confidence == "unknown"` (equivalently, nothing has ever been
+       observed for this artifact) -> `risk="unknown"` -- can't assess
+       freshness against nothing. Both `"agent-verified"` and `"manual"` are
+       treated as verified-enough-to-assess-freshness: a human's explicit
+       attestation is exactly as good a basis for a freshness check as an
+       agent's, even though no code path produces `"manual"` today (it is a
+       valid `CONFIDENCE_VALUES` member the schema already allows).
+    4. Otherwise: `days_since = (now - last_verified).days` against the
+       tier's `expiry_days`. Past the full window -> `"high"`; past
+       `_MEDIUM_RISK_THRESHOLD_FRACTION` of it -> `"medium"`; else -> `"low"`.
+       A malformed/hand-edited `last_verified` timestamp that fails to parse
+       degrades to `risk="unknown"` (AD-8: graceful degradation) rather than
+       raising -- the same treatment step 3 already gives "nothing observed".
+
+    Note: unlike every other `LedgerRecord` field, `risk` also depends on the
+    current wall-clock time (`datetime.now(timezone.utc)` below), so two
+    calls against identical log content, separated by enough real time, can
+    legitimately return a different `risk` -- a deliberate exception to the
+    "pure projection over the log" characterization used elsewhere in this
+    codebase.
+    """
+    tier_name = assignments.get((artifact_type, artifact_id))
+    if tier_name is None:
+        return None, None, "unknown"
+
+    expiry_days = tiers[tier_name]
+    tier_sla = tier_name
+    expiry_rule = f"{expiry_days} days"
+
+    if confidence == "unknown" or last_verified is None:
+        return tier_sla, expiry_rule, "unknown"
+
+    try:
+        last_verified_dt = datetime.strptime(last_verified, TIMESTAMP_FORMAT).replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        # A malformed/hand-edited last_verified timestamp degrades to
+        # risk="unknown" rather than raising (AD-8).
+        return tier_sla, expiry_rule, "unknown"
+
+    days_since = (datetime.now(timezone.utc) - last_verified_dt).days
+    if days_since > expiry_days:
+        risk = "high"
+    elif days_since > _MEDIUM_RISK_THRESHOLD_FRACTION * expiry_days:
+        risk = "medium"
+    else:
+        risk = "low"
+    return tier_sla, expiry_rule, risk
 
 
 #: Fixed field-priority order `_compute_escalation_owner` resolves against
@@ -147,11 +521,19 @@ def get_record(
     artifact_id: str,
     *,
     ledger_dir: Path = DEFAULT_LEDGER_DATA_DIR,
+    tiers_path: Path = DEFAULT_TIERS_PATH,
+    testing_window_path: Path = DEFAULT_TESTING_WINDOW_PATH,
 ) -> LedgerRecord:
     """Replay the artifact-type log and fold it into a LedgerRecord for one artifact.
 
     Latest RawFact wins per observed field; earlier versions are not lost --
     they remain in the log's history, just not reflected in current state.
+
+    Raises `TiersFileError` for a malformed `rezops.tiers.yaml` (Story 17)
+    and `TestingWindowFileError` for a malformed `rezops.testing_window.yaml`
+    (Story 19) -- both propagate unchanged from this function's own
+    `load_tiers`/`load_testing_window` calls; a missing config file of
+    either kind never raises (see those functions' own docstrings).
 
     Confidence is computed exclusively here (AD-5), never accepted as input:
     "agent-verified" if at least one field has ever been observed for this
@@ -186,9 +568,32 @@ def get_record(
     `_compute_escalation_owner`), including for an artifact_id with no
     recorded facts at all.
 
-    `verification_method`, `expiry_rule`, and `tier_sla` are intentionally
-    always `None` on every record this story produces -- no tiering data
-    source exists yet.
+    `tier_sla`/`expiry_rule`/`risk` are computed exclusively here too (Story
+    17, CAP-11), from `rezops.tiers.yaml` (`tiers_path`, `load_tiers`) x this
+    artifact's freshness x confidence (`_compute_tier_and_risk`) -- never
+    accepted as input, never set by a connector. An artifact with no `assign`
+    entry in that config resolves `tier_sla=None`/`expiry_rule=None`/
+    `risk="unknown"`, the most conservative reading, never a guess.
+    `verification_method` is intentionally always `None` on every record this
+    story produces -- no verification-method data source exists yet.
+
+    `rto_achieved_pct`/`rpo_achieved_pct`/`testing_window_compliance` are
+    computed exclusively here too (Story 19, CAP-12), generically from
+    whatever `rto_target_minutes`/`rto_actual_minutes`/`rpo_target_minutes`/
+    `rpo_actual_minutes`/`test_date` fields happen to be present on this
+    artifact (`_compute_test_achievement`,
+    `_compute_testing_window_compliance`) x the declared annual window
+    (`rezops.testing_window.yaml`, `testing_window_path`, `load_testing_window`)
+    -- never accepted as input, never set by a connector, and independent of
+    any `artifact_type` name.
+
+    Note: unlike every other field this function computes (which are pure
+    functions of the log's content), `risk` also depends on the current
+    wall-clock time (`_compute_tier_and_risk` calls `datetime.now(timezone.utc)`
+    internally) -- two calls against identical log content, separated by
+    enough real time, can legitimately return a different `risk`. This is a
+    real, deliberate exception to the "pure projection over the log"
+    characterization used elsewhere in this codebase.
     """
     try:
         by_artifact, last_verified_by_artifact = _fold_events_by_artifact(
@@ -199,6 +604,23 @@ def get_record(
 
     fields = by_artifact.get(artifact_id, {})
     last_verified = last_verified_by_artifact.get(artifact_id)
+    confidence = _compute_confidence(fields)
+
+    tiers, assignments = load_tiers(tiers_path)
+    tier_sla, expiry_rule, risk = _compute_tier_and_risk(
+        artifact_type,
+        artifact_id,
+        last_verified=last_verified,
+        confidence=confidence,
+        tiers=tiers,
+        assignments=assignments,
+    )
+
+    testing_window = load_testing_window(testing_window_path)
+    rto_achieved_pct, rpo_achieved_pct = _compute_test_achievement(fields)
+    testing_window_compliance = _compute_testing_window_compliance(
+        fields, testing_window
+    )
 
     return LedgerRecord(
         artifact_type=artifact_type,
@@ -206,7 +628,13 @@ def get_record(
         fields=fields,
         last_verified=last_verified,
         escalation_owner=_compute_escalation_owner(fields),
-        confidence=_compute_confidence(fields),
+        confidence=confidence,
+        tier_sla=tier_sla,
+        expiry_rule=expiry_rule,
+        risk=risk,
+        rto_achieved_pct=rto_achieved_pct,
+        rpo_achieved_pct=rpo_achieved_pct,
+        testing_window_compliance=testing_window_compliance,
     )
 
 
@@ -216,8 +644,10 @@ def get_coverage_map(
 ) -> dict[str, dict[str, int]]:
     """Tally confidence counts per artifact_type across every known artifact.
 
-    Groups by `artifact_type` only -- no tier/SLA dimension yet (no tiering
-    data source exists). Reserved/internal log filenames (leading
+    Groups by `artifact_type` only -- no tier/SLA/risk dimension: an
+    aggregate risk/RAG view over Story 17's new per-record `tier_sla`/`risk`
+    is a later story's job (see ARCHITECTURE-SPINE.md's Deferred section),
+    not this function's, unchanged here. Reserved/internal log filenames (leading
     underscore, e.g. a future `_ops.log.md`) are excluded entirely and never
     treated as an artifact type. A log filename that derives an empty
     artifact_type after stripping the `.log.md` suffix (e.g. a literal
@@ -305,12 +735,20 @@ def list_records(
     orphan_risk: bool | None = None,
     *,
     ledger_dir: Path = DEFAULT_LEDGER_DATA_DIR,
+    tiers_path: Path = DEFAULT_TIERS_PATH,
+    testing_window_path: Path = DEFAULT_TESTING_WINDOW_PATH,
 ) -> list[LedgerRecord]:
     """List every known LedgerRecord, optionally filtered.
 
     Lets a caller ask "what's stale" or "what's unknown" without already
     knowing every artifact's exact ID (CAP-4) -- `get_record` requires an
     exact `artifact_id`, and `get_coverage_map` only returns counts.
+
+    Raises `TiersFileError` for a malformed `rezops.tiers.yaml` (Story 17)
+    and `TestingWindowFileError` for a malformed `rezops.testing_window.yaml`
+    (Story 19) -- both propagate unchanged from this function's own
+    `load_tiers`/`load_testing_window` calls; a missing config file of
+    either kind never raises (see those functions' own docstrings).
 
     `artifact_type`, if given, restricts the scan to that one type's log
     (a nonexistent type's log yields no records -- never raises). An
@@ -352,10 +790,20 @@ def list_records(
     `last_verified`, like `get_record`'s, reflects append order, which
     matches true chronological order for every real ingestion path (only
     tests can construct an out-of-order history via `append_event`'s
-    timestamp override). `verification_method`, `expiry_rule`, and
-    `tier_sla` are intentionally always `None` on every record this story
-    produces -- no tiering data source exists yet. `escalation_owner` is
-    computed per record via `_compute_escalation_owner` (AD-10, Story 8).
+    timestamp override). `verification_method` is intentionally always
+    `None` on every record this story produces -- no verification-method
+    data source exists yet. `tier_sla`/`expiry_rule`/`risk` are computed
+    exclusively here too (Story 17, CAP-11), per record, via the same
+    `_compute_tier_and_risk` rule `get_record` uses, against one shared
+    `rezops.tiers.yaml` read (`tiers_path`, `load_tiers`) -- loaded once per
+    call, not once per record. `escalation_owner` is computed per record via
+    `_compute_escalation_owner` (AD-10, Story 8). `rto_achieved_pct`/
+    `rpo_achieved_pct`/`testing_window_compliance` are computed exclusively
+    here too (Story 19, CAP-12), per record, via the same
+    `_compute_test_achievement`/`_compute_testing_window_compliance` rules
+    `get_record` uses, against one shared `rezops.testing_window.yaml` read
+    (`testing_window_path`, `load_testing_window`) -- loaded once per call,
+    not once per record.
     """
     if artifact_type is not None:
         if _is_excluded_artifact_type_name(artifact_type):
@@ -364,6 +812,9 @@ def list_records(
     else:
         candidate_types = _discover_artifact_types(ledger_dir)
 
+    tiers, assignments = load_tiers(tiers_path)
+    testing_window = load_testing_window(testing_window_path)
+
     records: list[LedgerRecord] = []
     for a_type in candidate_types:
         try:
@@ -371,6 +822,14 @@ def list_records(
                 a_type, ledger_dir=ledger_dir
             )
         except LogFormatError:
+            error_tier_sla, error_expiry_rule, error_risk = _compute_tier_and_risk(
+                a_type,
+                LOG_FORMAT_ERROR_ARTIFACT_ID,
+                last_verified=None,
+                confidence="unknown",
+                tiers=tiers,
+                assignments=assignments,
+            )
             records.append(
                 LedgerRecord(
                     artifact_type=a_type,
@@ -378,6 +837,12 @@ def list_records(
                     fields={},
                     last_verified=None,
                     confidence="unknown",
+                    tier_sla=error_tier_sla,
+                    expiry_rule=error_expiry_rule,
+                    risk=error_risk,
+                    rto_achieved_pct=None,
+                    rpo_achieved_pct=None,
+                    testing_window_compliance="unknown",
                 )
             )
             continue
@@ -393,14 +858,33 @@ def list_records(
             record_is_orphan_risk = bool(fields) and escalation_owner is None
             if orphan_risk is not None and record_is_orphan_risk != orphan_risk:
                 continue
+            last_verified = last_verified_by_artifact.get(artifact_id)
+            tier_sla, expiry_rule, risk = _compute_tier_and_risk(
+                a_type,
+                artifact_id,
+                last_verified=last_verified,
+                confidence=record_confidence,
+                tiers=tiers,
+                assignments=assignments,
+            )
+            rto_achieved_pct, rpo_achieved_pct = _compute_test_achievement(fields)
+            testing_window_compliance = _compute_testing_window_compliance(
+                fields, testing_window
+            )
             records.append(
                 LedgerRecord(
                     artifact_type=a_type,
                     artifact_id=artifact_id,
                     fields=fields,
-                    last_verified=last_verified_by_artifact.get(artifact_id),
+                    last_verified=last_verified,
                     escalation_owner=escalation_owner,
                     confidence=record_confidence,
+                    tier_sla=tier_sla,
+                    expiry_rule=expiry_rule,
+                    risk=risk,
+                    rto_achieved_pct=rto_achieved_pct,
+                    rpo_achieved_pct=rpo_achieved_pct,
+                    testing_window_compliance=testing_window_compliance,
                 )
             )
 

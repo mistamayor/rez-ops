@@ -245,3 +245,93 @@
     try/except around its call site in
     `action_proposals.create_action_proposal` (simplification only, no
     behavior change).
+- id: "17"
+  title: "Tier assignment & DR risk classification"
+  description: >-
+    Populate tier_sla/expiry_rule -- present in the LedgerRecord schema since
+    Story 1 but left None by every story since ("no tiering data source
+    exists yet") -- from a new git-tracked tier-assignment config, and
+    compute a DR risk level (high/medium/low) from tier x freshness x
+    confidence (SPEC CAP-11). Unblocks CAP-10's policy engine: its
+    "automatic" branch requires tier_sla_known=true, which is always false
+    today.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Implements CAP-11. New config file declares an artifact_type/artifact_id
+    -> tier mapping and each tier's expiry-rule SLA, mirroring
+    rezops.policy.yaml's existing declare-in-config/ledger-core-computes-the-
+    derived-value pattern (AD-12) -- never a connector-supplied or
+    caller-supplied tier_sla/risk value (extends AD-5/AD-9's existing
+    discipline, same constraint class as EvidenceBundle.confidence and
+    ActionProposal.policy_decision). An artifact with no declared tier
+    resolves to the most conservative reading (risk unknown), never a guess,
+    mirroring AD-10's no-signal-escalates discipline. Exact risk formula
+    (how freshness/confidence combine with tier's expiry rule into
+    high/medium/low) is this story's own design decision to make and
+    document, not prescribed here.
+- id: "18"
+  title: "DR readiness summary query"
+  description: >-
+    One new read-only MCP tool aggregating risk/RAG status across three
+    independent axes -- application tier, infrastructure, data centres --
+    in a single call, extending CAP-4's existing chat-queryable live state
+    (not a new capability). Mirrors ledger_get_briefing's existing shape:
+    composes other read tools' results, no write of any kind.
+  spec_checkpoint: true
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Extends CAP-4. Depends on Story 17's computed tier_sla/risk fields
+    existing -- read-only, data endpoint only, no UI. Three independent
+    axes means a caller can ask about tier readiness, infrastructure
+    readiness, and data-centre readiness as separate rollups in one
+    response, not one flattened list (a real nuance surfaced by cross-
+    checking against a reference DR-portal design during roadmap planning).
+- id: "19"
+  title: "DR test achievement signals"
+  description: >-
+    For a DR test result artifact, compute RTO/RPO achieved as a percentage
+    of target (not bare pass/fail), and flag whether it ran inside the
+    program's mandated annual testing window as an independent compliance
+    signal regardless of pass/fail (SPEC CAP-12).
+  spec_checkpoint: true
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implements CAP-12. Both values are ledger-core-computed from a DR test
+    result artifact's own fields (target/actual recovery-time fields for
+    RTO/RPO; a scheduled-date field compared against a config-declared
+    annual window) -- never accepted as connector/caller input, same
+    discipline as Story 17. Independent of Stories 17/18: operates on
+    test-result artifacts directly, no dependency on tier_sla existing.
+- id: "20"
+  title: "Executive dashboard generator"
+  description: >-
+    A new script, ops/generate_dashboard.py, generates a self-contained
+    static HTML snapshot of current DR readiness from real ledger state --
+    no hosted server, regenerate-on-demand (SPEC CAP-13). Only the Home
+    view (KPI tiles + RAG status) is wired to real data in this pass; other
+    prototype views (dependency map, evidence Q&A, test scheduling) have no
+    real data source yet and stay visibly labeled as such.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Implements CAP-13. Mirrors ops/run_scheduled_briefing.py's existing
+    location/operational-script convention -- a non-interactive, non-Voice
+    consumer of ledger-core's already-existing read surface
+    (get_dr_readiness_summary, list_records, get_briefing), no new
+    computation. KPI tiles are redesigned around Rez Ops's own real
+    capabilities (total artifacts tracked, orphan-risk count,
+    unknown-confidence count, pending drafts, tiers at high/medium risk,
+    data-quality issues) rather than re-skinning the prototype's
+    CEVA-specific tile set with real numbers substituted in -- that
+    redesign is this story's own design decision to make and document.
+    Visual design (palette, typography, confidence-dot device) is already
+    validated in the iterated Claude Artifact prototype from roadmap
+    planning; this story's job is wiring real data into that validated
+    shape, not re-designing it. Views with no real backing data source
+    (dependency map, "Ask Rez Ops", upcoming/recent test tables) remain in
+    the generated page but must be visibly and honestly labeled as
+    not-yet-wired -- never populated with fabricated numbers presented as
+    real. User-confirmed checkpoints reflect this project's history with
+    dashboards (built and rejected twice before this cycle): review both
+    the plan and the finished result.

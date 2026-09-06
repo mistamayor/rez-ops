@@ -30,6 +30,24 @@ cd /path/to/rez-ops
 uv run python ops/run_scheduled_briefing.py; echo "exit: $?"
 ```
 
+## `generate_dashboard.py`
+
+Generates a static, read-only executive dashboard HTML snapshot (CAP-13)
+from real ledger state — no hosted server, no auto-refresh, no live query
+from the page itself. A fresh run of the script is the only way to update
+it.
+
+```bash
+uv run python -m ops.generate_dashboard
+```
+
+Writes to `ledger_data/dashboard.html` by default; pass `--output <path>`
+to write elsewhere. Open the resulting file directly in a browser. Only the
+Home view (six KPI tiles + the DR-readiness-by-tier RAG panel) is wired to
+real data — every other view (Dependency Map, Ask Rez Ops, Upcoming/Recent
+DR Tests) carries a permanent "Not yet wired to real data" banner rather
+than fabricated numbers.
+
 ## Registering a schedule (manual step — nothing is installed by this story)
 
 Neither of the snippets below is applied automatically. Registering a

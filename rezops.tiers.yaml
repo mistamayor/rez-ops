@@ -1,0 +1,36 @@
+# rezops.tiers.yaml -- Story 17 (CAP-11): tier vocabulary + tier assignments.
+#
+# Inputs only -- ledger-core (ledger_core/projection.py) is the sole computer
+# of what these declarations mean for a given LedgerRecord's tier_sla,
+# expiry_rule, and risk. Kept separate from rezops.policy.yaml's per-action
+# risk/impact declarations (AD-2's one-responsibility-per-surface lesson
+# applies to config files too) -- tiering is per-artifact criticality, policy
+# is per-action risk.
+#
+# Two entry kinds, one per line, no PyYAML dependency (mirrors
+# rezops.policy.yaml's flat, hand-rollable-parser style):
+#
+#   tier.<name>.expiry_days: <int>     -- declares a tier and its expiry SLA
+#   assign.<artifact_type>/<artifact_id>: <tier name>
+#                                       -- assigns exactly one declared tier
+#                                          to one specific artifact
+#
+# An `assign` line naming a tier not declared above is a malformed-config
+# error (fails loudly, TiersFileError) -- never silently ignored. An artifact
+# with no `assign` entry here always resolves risk="unknown" (Story 17's own
+# most-conservative-reading rule), never a guess.
+
+tier.platinum.expiry_days: 30
+tier.gold.expiry_days: 90
+tier.silver.expiry_days: 180
+tier.infrastructure.expiry_days: 60
+tier.data_centre.expiry_days: 120
+
+assign.bia/payments-checkout: platinum
+assign.runbooks/payments-checkout: platinum
+assign.raci/payments-checkout: gold
+assign.test_records/payments-checkout: silver
+assign.bia/network-core: infrastructure
+assign.runbooks/network-core: infrastructure
+assign.bia/primary-site: data_centre
+assign.raci/primary-site: data_centre

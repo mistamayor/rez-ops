@@ -14,12 +14,13 @@ source. Each declared action's `impact` (`low`/`medium`/`high`) is *copied*
 onto the created proposal; `policy_decision` is computed from that impact,
 the minimum `confidence` across every cited `EvidenceBundle` (Story 12's
 `list_evidence`, never an average), and whether the target's `tier_sla` is
-currently known (via `ledger_core.projection.get_record` -- AD-9 already
-defers the formula that would ever populate it, so this always resolves to
-its most conservative reading against today's real data, honestly, not a
-bug). Neither value is ever accepted as a caller-supplied argument -- both
-are computed exclusively here, exactly like `EvidenceBundle.confidence`
-(AD-11) and `LedgerRecord.tier_sla`/`confidence` (AD-5/AD-9) before it.
+currently known (via `ledger_core.projection.get_record`, which populates
+`tier_sla` from a declared `rezops.tiers.yaml` tier assignment as of Story
+17/CAP-11 -- a target with no declared tier still conservatively resolves
+`tier_sla_known=False`, never a guess). Neither value is ever accepted as a
+caller-supplied argument -- both are computed exclusively here, exactly like
+`EvidenceBundle.confidence` (AD-11) and `LedgerRecord.tier_sla`/`confidence`
+(AD-5/AD-9) before it.
 
 Unlike `Draft`/`EvidenceBundle` (one file, created-only), an `ActionProposal`
 has a real lifecycle -- proposed, then decided -- so this module extends
@@ -51,7 +52,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ledger_core.evidence import list_evidence
-from ledger_core.projection import get_record
+from ledger_core.projection import DEFAULT_TIERS_PATH, get_record
 
 #: Default root for git-committed ledger data. Kept equal in value to
 #: `ledger_core.log.DEFAULT_LEDGER_DATA_DIR`/`ledger_core.drafts.DEFAULT_LEDGER_DATA_DIR`/
@@ -311,10 +312,12 @@ def _compute_policy_decision(
     AND `tier_sla_known` AND `min_confidence == 1.0`; `requires_approval`
     otherwise. Pure and deterministic: identical inputs always produce the
     identical decision -- no wall-clock, randomness, or hidden state.
-    Against today's real data `tier_sla_known` is always `False` (AD-9's
-    formula is deferred, so `ledger_core.projection.get_record` never
-    populates `tier_sla`), so `automatic` never actually fires yet -- an
-    honest characteristic of v1, not a bug (see the story's Design Notes).
+    `tier_sla_known` now genuinely varies with real data (Story 17, CAP-11:
+    `ledger_core.projection.get_record` populates `tier_sla` from a
+    declared `rezops.tiers.yaml` tier assignment) -- `automatic` can
+    actually fire for a target with a declared tier once `impact`/
+    `min_confidence` also line up; a target with no declared tier still
+    conservatively resolves `tier_sla_known=False`, never a guess.
     """
     if min_confidence < 0.5:
         return "denied"
@@ -441,6 +444,7 @@ def create_action_proposal(
     *,
     ledger_dir: Path = DEFAULT_LEDGER_DATA_DIR,
     policy_path: Path = DEFAULT_POLICY_PATH,
+    tiers_path: Path = DEFAULT_TIERS_PATH,
 ) -> ActionProposal:
     """Create one ActionProposal: validate, decide, and append both events.
 
@@ -469,9 +473,12 @@ def create_action_proposal(
     `confidence` across every cited bundle (never an average -- the most
     cautious evidence sets the ceiling), and whether the target's
     `LedgerRecord.tier_sla` is currently non-`None`
-    (`ledger_core.projection.get_record`) -- also never accepted as an
-    argument (no `policy_decision` parameter either). Both are exclusively
-    ledger-core-computed (AD-12).
+    (`ledger_core.projection.get_record`, resolved against `tiers_path` --
+    defaulting to the real, git-committed `rezops.tiers.yaml` exactly like
+    `get_record`'s own default, but overridable for testing so no test
+    depends on/mutates that real committed file) -- also never accepted as
+    an argument (no `policy_decision` parameter either). Both are
+    exclusively ledger-core-computed (AD-12).
 
     A `proposed` event (carrying `action`/`target_artifact_type`/
     `target_artifact_id`/`reason`/`evidence`/`impact`) is appended,
@@ -533,11 +540,18 @@ def create_action_proposal(
     # `get_record` itself now fails open on a corrupted target artifact-type
     # log (AD-8: it returns the same empty-fields/unknown record it returns
     # for a never-observed artifact_id, rather than raising), so no
-    # try/except is needed here -- criticality still resolves to its most
-    # conservative reading (`tier_sla` absent -> `tier_sla_known = False`)
-    # rather than crashing proposal creation over a data-quality problem in
-    # an unrelated artifact type.
-    record = get_record(target_artifact_type, target_artifact_id, ledger_dir=ledger_dir)
+    # try/except is needed here. `tier_sla` (Story 17, CAP-11) is resolved
+    # from `rezops.tiers.yaml`'s declared assignment for this exact
+    # target_artifact_type/target_artifact_id -- independent of whether that
+    # type's own fact log parses -- so `tier_sla_known` genuinely varies with
+    # real data now: `True` for a target with a declared tier, `False` (the
+    # conservative default, never a guess) for one with none.
+    record = get_record(
+        target_artifact_type,
+        target_artifact_id,
+        ledger_dir=ledger_dir,
+        tiers_path=tiers_path,
+    )
     tier_sla_known = record.tier_sla is not None
 
     policy_decision = _compute_policy_decision(
