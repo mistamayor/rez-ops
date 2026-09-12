@@ -686,6 +686,38 @@
       </div>
     </section>
 
+    <!-- 5b: AGENT RUNTIME -->
+    <section class="slide" data-title="Agent Runtime">
+      <div class="slide-inner">
+        <span class="kicker"><svg class="icon"><use href="#i-voice"/></svg> Next Generation — Agent Runtime</span>
+        <h1 class="slide-title">Voice becomes a runtime Rez Ops can drive</h1>
+        <h2 class="slide-sub">AD-16 · AD-17 · AD-18 · AD-19 · AD-20 — September 2026. Rez Ops can now <em>launch</em> a provider's official CLI on the operator's own subscription. Nothing about observing, deriving, or gating changed.</h2>
+        <div class="grid-2">
+          <div class="decision-card c-voice">
+            <span class="ad-id">AD-16 · Two modes, one MCP surface</span>
+            <p class="decision-text"><strong>Hosted</strong> is today: a human's MCP client loads <code>.mcp.json</code>. <strong>Driven</strong> is new: <code>agents/</code> launches Claude Code, Codex, or Antigravity CLI headless against the <em>same</em> server set, deriving each vendor's native config from <code>.mcp.json</code> — never a second hand-kept list.</p>
+            <p class="prevents"><b>Prevents:</b> two paths into Rez Ops disagreeing on which tools exist; the Ledger ever orchestrating an agent.</p>
+          </div>
+          <div class="decision-card c-voice">
+            <span class="ad-id">AD-17 · Probed, never declared</span>
+            <p class="decision-text">An adapter reports <code>installed</code> / <code>authenticated</code> / <code>healthy</code> and its capabilities by checking the real runtime at call time. Config holds preferences only. <code>rezops doctor</code> is the same probe, rendered.</p>
+            <p class="prevents"><b>Prevents:</b> routing work to a runtime that quietly stopped working — as one vendor CLI did on 2026-06-18.</p>
+          </div>
+          <div class="decision-card c-ops">
+            <span class="ad-id">AD-18 · Its own store: <code>agent_data/</code></span>
+            <p class="decision-text">Sessions, tasks, and a structured event stream, append-only like the Ledger, written by <code>agents/</code> alone. Ledger-core never reads it. Transcripts off by default, git-ignored, consumed by nothing.</p>
+            <p class="prevents"><b>Prevents:</b> "Claude said X" silently becoming "Rez Ops knows X"; a second writer to <code>ledger_data/</code>.</p>
+          </div>
+          <div class="decision-card c-ledger">
+            <span class="ad-id">AD-19 · Provenance from the environment</span>
+            <p class="decision-text">Ledger-core stamps <code>provenance</code> on <em>every</em> write — RawFact, Draft, Evidence, Proposal — from its own process environment, set by the launcher. Never a tool argument. Hosted stamps <code>mode: hosted</code> + <code>REZOPS_OPERATOR</code>.</p>
+            <p class="prevents"><b>Prevents:</b> the LLM describing itself — the same forgeable channel AD-14 closed for <code>approver</code>; a driven agent ingesting a "fact" indistinguishable from a Sensor read.</p>
+          </div>
+        </div>
+        <div class="callout" style="margin-top:22px;"><svg class="icon" style="width:18px;height:18px;vertical-align:-3px;margin-right:6px;"><use href="#i-shield"/></svg><strong>AD-20 — the adapter contract, signatures deferred.</strong> Seven invariants every adapter obeys: official runtime only, never its credentials · <code>auth_mode</code> always visible, API is opt-in · vendor names live only in the adapter · one shared failure enum, never "unknown error" · deterministic selection, never the LLM's · the <code>fake</code> is a real in-process adapter and the first story · tool scope is exactly <code>.mcp.json</code>'s servers, enforced in strict mode and verified before the first task. The <code>AgentProvider</code> method names wait for the Phase 1 spike — the plan's own rule.</div>
+      </div>
+    </section>
+
     <!-- 6: OPERATIONAL ENVELOPE -->
     <section class="slide" data-title="Operational Envelope">
       <div class="slide-inner">
@@ -717,7 +749,7 @@
       <div class="slide-inner">
         <span class="kicker"><svg class="icon"><use href="#i-box"/></svg> What It's Built On</span>
         <h1 class="slide-title">A stack with nothing to babysit</h1>
-        <h2 class="slide-sub">No database, no orchestrator, no daemon. Four moving parts.</h2>
+        <h2 class="slide-sub">No database, no orchestrator, no daemon. Four moving parts — plus three provider CLIs Rez Ops launches but never depends on.</h2>
         <div class="panel">
           <table class="stack-table">
             <thead><tr><th>Component</th><th>Version / constraint</th><th>Why</th></tr></thead>
@@ -729,13 +761,23 @@
               </tr>
               <tr>
                 <td class="name">mcp (Python SDK)</td>
-                <td><code>1.29.x</code>, pinned <code>&lt;2</code></td>
-                <td class="note">v2.0.0 GA shipped 2026-07-28 with breaking changes — too new (~2 weeks old) to build v1 on.</td>
+                <td><code>&gt;=1.29,&lt;2</code> (1.30.0 current 1.x)</td>
+                <td class="note">v2 (2.2.0) is now the default install; 1.x is security-fixes only. Adapters never import the SDK, so the pin holds through Phase 1 — migrate before Phase 3.</td>
               </tr>
               <tr>
                 <td class="name">Claude Code</td>
-                <td>reference runtime</td>
-                <td class="note">Must support project-scoped <code>.mcp.json</code> and <code>-p --mcp-config --output-format json</code> headless mode. Any MCP-compatible client works — this is Voice, not a hard dependency.</td>
+                <td>2.1.269 · <code>claude</code> adapter</td>
+                <td class="note">Verified live 2026-09-12: <code>-p --mcp-config .mcp.json --strict-mcp-config</code> loaded all 7 servers, 18 tools. Reference runtime and first real adapter — still Voice, never a hard dependency.</td>
+              </tr>
+              <tr>
+                <td class="name">OpenAI Codex CLI</td>
+                <td><code>codex</code> adapter</td>
+                <td class="note"><code>codex exec</code>, JSONL events, schema output, device-code subscription login. MCP via <code>config.toml</code>, derived from <code>.mcp.json</code>. Pin when built.</td>
+              </tr>
+              <tr>
+                <td class="name">Google Antigravity CLI <code>agy</code></td>
+                <td>1.2.0 · <code>google</code> adapter</td>
+                <td class="note">The subscription route since 2026-06-18 (Gemini CLI no longer serves AI Pro/Ultra). Headless denial exits 0 — health is read from the JSON, never the exit code (AD-17).</td>
               </tr>
               <tr>
                 <td class="name">git</td>
@@ -851,11 +893,19 @@
           </div>
           <div class="deferred-item">
             <svg class="icon"><use href="#i-warn"/></svg>
-            <div><div class="what">The Executor — actually performing a policy-approved <code>ActionProposal</code></div><div class="why">AD-12 computes and records <code>policy_decision</code>; nothing consumes it to act. A deliberate future decision, not a default extrapolation from AD-12 existing.</div></div>
+            <div><div class="what">Building the Executor — AD-13/14/15 design it, nothing builds it</div><div class="why">A centralized <code>ledger_authorize_execution</code> gate, an operator-attested <code>approved</code> event, a retry-aware execution log — all design-only until a story deliberately implements them.</div></div>
           </div>
           <div class="deferred-item">
             <svg class="icon"><use href="#i-box"/></svg>
-            <div><div class="what">MCP SDK v2 migration</div><div class="why">v2.0.0 GA shipped 2026-07-28 — about two weeks old at spine time. Too new to commit to; revisit once it settles.</div></div>
+            <div><div class="what">MCP SDK v2 migration — now with a deadline</div><div class="why">v2 is the stable default as of September 2026. Adapters never import the SDK, so the pin holds through Phase 1; migrate before Phase 3, where agents first drive MCP integration.</div></div>
+          </div>
+          <div class="deferred-item">
+            <svg class="icon"><use href="#i-layers"/></svg>
+            <div><div class="what">Missions, routing, multi-agent review, skills, the typed domain model</div><div class="why">All in the plan, all Phase 4+. Withheld for the plan's own reason: prove the provider runtime first. Two conflicts travel with them — a mission cites <code>ActionProposal</code> ids, never owns its own approvals; an LLM-free Sensor → Ledger relay would amend AD-1.</div></div>
+          </div>
+          <div class="deferred-item">
+            <svg class="icon"><use href="#i-gauge"/></svg>
+            <div><div class="what"><code>AgentProvider</code> method signatures and per-vendor config derivation</div><div class="why">AD-20 fixes the seven invariants; the Phase 1 spike fixes the names after inspecting the real runtimes. "Do not prematurely implement fake abstractions."</div></div>
           </div>
           <div class="deferred-item">
             <svg class="icon"><use href="#i-folder"/></svg>
@@ -863,7 +913,7 @@
           </div>
           <div class="deferred-item">
             <svg class="icon"><use href="#i-shield"/></svg>
-            <div><div class="what">Multi-user / multi-tenant support</div><div class="why">v1 is single-owner by design, per the brief's stated primary user.</div></div>
+            <div><div class="what">Hosted / multi-user deployment</div><div class="why">Single-operator by design. The plan names a hosted phase and insists it be a deliberate architectural decision — never a side effect of adding a UI.</div></div>
           </div>
         </div>
       </div>
@@ -879,7 +929,7 @@
           <div class="panel">
             <div class="np-row">
               <svg class="icon" style="color:var(--sensor);"><use href="#i-sensor"/></svg>
-              <div><span class="label">Read-only by default; action is an explicit, gated door</span><span class="txt">Sensors only fetch and normalize. AD-6 blocks any write path from existing by accident; AD-11/AD-12 add a named door for proposing a claim or action — but no executor exists behind it.</span></div>
+              <div><span class="label">Read-only by default; action is an explicit, gated door</span><span class="txt">Sensors only fetch and normalize. AD-6 blocks any write path from existing by accident; AD-11/AD-12 add a named door for proposing a claim or action; AD-13–15 design what would walk through it. A driven agent (AD-16–20) gets exactly the Ledger's gated tools and nothing else — and no provider is ever a system of record.</span></div>
             </div>
             <div class="np-row">
               <svg class="icon" style="color:var(--ledger);"><use href="#i-ledger"/></svg>
@@ -893,10 +943,10 @@
           <div class="panel">
             <div class="kicker" style="margin-bottom:14px;">Next steps</div>
             <ol class="next-steps">
-              <li>Pick the first connector to build against a real source (calendar or CMDB) and stand up the shared schema module (AD-4/AD-9) alongside it.</li>
-              <li>Stand up the ledger-core skeleton: append-only writer, projection, confidence computation stub (AD-3/AD-5).</li>
-              <li>Wire <code>.mcp.json</code> and confirm headless invocation with autodiscovery intact (AD-7).</li>
-              <li>Run the first end-to-end briefing and validate the confidence/coverage map is visible, not buried.</li>
+              <li><strong>Phase 1 spike:</strong> <code>agents/core</code> + the in-process <code>fake</code> + the shared contract suite first — they define the interface (AD-20 §6).</li>
+              <li>The <code>claude</code> adapter second: derive from <code>.mcp.json</code>, launch strict, verify the loaded server set, forward <code>REZOPS_AGENT_*</code> by name (AD-16/19/20).</li>
+              <li><code>codex</code> and <code>google</code> against the same suite; <code>rezops doctor</code> reports all four by probe (AD-17).</li>
+              <li>Phase 3: ledger-core stamps provenance on all four write tools, required-on-write / optional-on-read (AD-19). Nothing in <code>ledger_core/</code> moves before then.</li>
             </ol>
           </div>
         </div>

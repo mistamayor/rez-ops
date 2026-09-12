@@ -1,0 +1,116 @@
+# Rubric Walk — Reviewer Gate — AD-16..AD-20 Amendment
+
+**Target:** `ARCHITECTURE-SPINE.md` (Rez Ops), amendment adding AD-16–AD-20, amending AD-1/AD-7 in place, new "Agent runtime" Consistency Conventions row, new Stack rows, Structural Seed additions (`agents/`, `agent_data/`, `docs/`, `tests/providers/`, `rezops` CLI), new Deferred items.
+**Reviewed against:** the brownfield codebase (`pyproject.toml`, `.mcp.json`, `ledger_core/server.py`, `ledger_core/evidence.py`, `ledger_core/action_proposals.py`, `ledger_core/log.py`, `ops/run_scheduled_briefing.py`, `ops/README.md`, `tests/test_mcp_config.py`, `.gitignore`, `git ls-files ledger_data`), `docs/product-direction.md` §18–29, §37–42, §49–55, §62–65, §78–79, the spine's git diff against the pre-amendment version, and the session `.memlog.md`. Local CLI check: `claude --version` → 2.1.269; `codex` npm wrapper present, vendor binary ENOENT; `agy` not installed; `gemini` 0.36.0; `uv.lock` pins `mcp` 1.29.0.
+**Reviewer:** rubric walker. Date: 2026-09-12.
+
+## Verdict
+
+**CONDITIONAL PASS.**
+
+The five new ADs are internally coherent — every `Prevents` claim is answered by a `Rule` clause, the design paradigm/diagrams/conventions/seed all agree with each other, AD-1 and AD-7 are amended additively (the diff removes nothing substantive; the old `claude -p` clause is relocated to the claude adapter, not dropped), and the Stack rows carry dates and versions. The amendment correctly refuses to over-decide (signatures deferred to the spike) while fixing the invariants that actually matter (single MCP surface, probe-not-declare, separate store, environment-attested provenance, adapter contract).
+
+It does not yet pass outright because four **high** findings would let Phase-1 stories diverge from each other or contradict the codebase they are ratifying:
+
+1. Amended **AD-7** and new **AD-18** contradict each other on the failed-driven-run path, and the spine is silent on what happens to `ops/run_scheduled_briefing.py` — which, the moment AD-20 §3 is ratified, is a standing violation of it.
+2. **AD-19**'s Hosted-mode `operator` value depends on AD-14's operator identity, which is DESIGN-ONLY and names no variable — the Phase-1 stamping story has nothing to read.
+3. **AD-19**'s stamp does not fit how `evidence.py` / `action_proposals.py` actually parse records back: both strictly reject a missing key, so adding `provenance` without a stated read-compatibility rule corrupts every existing bundle and the entire flat proposals log. The spine also doesn't say which phase owns the ledger-core change (the plan's Phase 1 says "Do not modify Ledger").
+4. **AD-19** stamps only two of ledger-core's four write tools; `ledger_ingest_raw_fact` and `ledger_create_draft` remain provenance-free, so its own `Prevents` ("a fake-authored claim indistinguishable from a real one") is not achieved.
+
+Fix those four and the medium items on sequencing/fake-definition (F5), env inheritance (F6), and durability (F7) and this is a PASS.
+
+## Findings
+
+### F1 — HIGH — AD-7 (amended) ↔ AD-18, Structural Seed (`ops/`): failed driven run has two contradictory owners, and `ops/run_scheduled_briefing.py`'s fate is undecided
+
+**What's wrong.** Amended AD-7 keeps "A failed scheduled run appends an error entry to `ledger_data/_ops.log.md`" and now says scheduled work is "the OS scheduler invoking the agent runtime in Driven mode" — i.e. `rezops agent run`, which lives in `agents/`. AD-18 says "`agents/` never writes `ledger_data/`". Both cannot hold. An implementer of the `rezops agent run` story will either (a) write `_ops.log.md` and break AD-18, or (b) emit `task.failed` to `agent_data/` and break AD-7 — and the Consistency Conventions row still says "Scheduled-run failures log to `ledger_data/_ops.log.md` (AD-7)".
+
+Second, the codebase today has `ops/run_scheduled_briefing.py` hard-coding `["claude", "-p", "--mcp-config", ..., "--output-format", "json"]` with its own 600 s timeout, its own failure-reason vocabulary (`timeout|nonzero_exit|malformed_output|unexpected_error`), and its own log. AD-20 §3 says "Vendor CLI names, flags, binaries … appear *only* inside that provider's adapter package". The Structural Seed says "The `ops/` scripts stay where they are until a concrete architectural reason moves them" — AD-20 §3 *is* that concrete reason, and the spine doesn't say so. Two Phase-1 stories could diverge: one deletes the script, one keeps it as a second Driven launcher with a parallel failure vocabulary (vs AD-20 §4's shared enum), and `tests/test_scheduled_briefing.py` either stays or goes.
+
+**Proposed fix.**
+- AD-7 Rule: replace the `_ops.log.md` sentence with: "A failed driven run is recorded as a `task.failed`/`session.failed` event in `agent_data/` (AD-18) carrying an AD-20 §4 failure code, and `rezops agent run` exits non-zero so the OS scheduler's own logging sees it. `ledger_data/_ops.log.md` is retired: nothing in `agents/` writes `ledger_data/`." Update the Conventions "State & cross-cutting" row to match.
+- Structural Seed, `ops/`: add "`run_scheduled_briefing.py` → Phase 1: becomes a one-line shim that exec's `rezops agent run --provider claude --task briefing` (or is deleted and `ops/README.md`'s cron/launchd examples updated); its `claude -p` literal and timeout move into `agents/providers/claude/` per AD-20 §3; `tests/test_scheduled_briefing.py` follows." Remove the "stay where they are" sentence or scope it to `generate_dashboard.py`.
+- Consider making "a driven run exits non-zero on any `task.failed`" an explicit AD-7 clause — today the ops script's `main()` return code is the only thing cron can see.
+
+### F2 — HIGH — AD-19: Hosted-mode `operator` reads an identity source that does not exist
+
+**What's wrong.** AD-19: "In Hosted mode … ledger-core stamps `mode: hosted` with `operator` from AD-14's operator identity." AD-14 is `[DESIGN ONLY — not yet built]` and says only "e.g. an env var set once by the human operating this installation" — no name, no absent-case rule. `grep REZOPS_ ledger_core/` returns nothing; ledger-core reads no env var today. The Phase-1 (or Phase-3) story that implements the AD-19 stamp must invent a variable name and decide what to stamp when it is unset. A later AD-14 story would invent its own. This is precisely the "two units choose incompatibly on something the spine left silent" test, and the value is the one that goes into every provenance block forever.
+
+**Proposed fix.** Decide it now, in AD-19 and the Conventions row: "`REZOPS_OPERATOR` — set once by the human operating this installation, in the `REZOPS_*` namespace AD-7 already owns, never set by the agent runtime launcher (so it is inherited identically in both modes). Absent → ledger-core stamps `operator: unknown` — loud, never guessed from `$USER`/`getpass`, same escalate-rather-than-guess precedent as AD-10." Then AD-14 references AD-19's variable instead of the reverse.
+
+### F3 — HIGH — AD-19 vs `ledger_core/evidence.py` / `action_proposals.py`: the stamp breaks read-back of every existing record unless a compatibility rule is stated; phase ownership unclear
+
+**What's wrong.** The spine says ledger-core "stamps a `provenance` block … onto every `EvidenceBundle` and `ActionProposal` it creates". In the brownfield:
+- `evidence._parse_bundle_file` raises `EvidenceFileFormatError` for any key in `_FRONTMATTER_KEYS` that is missing; `list_evidence` then returns a sentinel bundle with `confidence=0.0`. Adding `provenance` to the required keys turns every pre-amendment bundle into a sentinel — and because `create_action_proposal` takes the **minimum** confidence across cited bundles, every proposal citing a legacy bundle becomes `denied`.
+- `action_proposals.list_action_proposals` raises `ActionProposalLogFormatError` if a `proposed` event lacks any `_PROPOSED_FIELD_KEYS` key, and this is **one flat log** — a single legacy line fails the whole fold. `create_action_proposal` then silently skips its id-collision check (it catches exactly that error).
+Both modules also carry a duplicate-key guard and exact-key-set parsing, so "just add a field" is a format change, not an addition. The spine is silent on read-compatibility.
+
+Also: the plan's Phase 0 exit criterion is "No production code changed" and Phase 1 says "Do not modify Ledger"; the amendment's AD-19 requires a ledger-core change. The team-lead framing lists "ledger-core provenance stamping" as Phase 1. The spine should say which phase owns it and, if Phase 1, explicitly override the plan's instruction.
+
+**Proposed fix.** Add to AD-19's Rule: "`provenance` is required on every record ledger-core writes from this amendment forward and **optional on read**: a record predating it parses with `provenance: null` (rendered as `legacy`), never as a format error — the existing corrupted-record sentinels stay reserved for genuinely unparseable data. Stamping the `proposed` event's `fields` JSON and the bundle frontmatter is a ledger-core change owned by **Phase 3 (Agent ↔ MCP Integration)**, the first phase in which a driven session can reach ledger-core; Phase 1 builds no ledger-core code (plan §63)." Alternatively assign it to Phase 1 and say so explicitly as a plan override.
+
+### F4 — HIGH — AD-19: only two of ledger-core's four write tools are stamped
+
+**What's wrong.** `ledger_core/server.py` has exactly four write tools: `ledger_ingest_raw_fact`, `ledger_create_draft`, `ledger_create_evidence`, `ledger_create_action_proposal`. AD-19 covers the last two. In this architecture Voice is what carries connector output into `ledger_ingest_raw_fact` (the README's user guide is explicit about this) and Voice authors every `Draft`. A driven `fake` or wrong-provider session can therefore ingest a RawFact — which then becomes an observed "fact" with `confidence: agent-verified` — or queue a Draft with no record of which session/provider/mode did it. AD-19's `Prevents` ("a fake- or wrong-provider-authored claim being indistinguishable from a real one") is exactly the hole left open, and ingestion is the more dangerous of the two channels. `log.py`'s line format has no slot for it today.
+
+**Proposed fix.** AD-19 Rule: "ledger-core stamps `provenance` on **every** write it performs — the RawFact event line (a `provenance=` token alongside `source=`), the Draft frontmatter, the EvidenceBundle frontmatter, and the `proposed` event — from the same process-environment source. `RawFact.source` remains connector provenance (AD-9, *where the fact came from*); `provenance` is session provenance (*who carried it into the Ledger*); the two are never conflated." Update the AD-19 `Binds` line to add `RawFact`/`Draft`.
+
+### F5 — MEDIUM — AD-20 §6 / Deferred (signatures): Phase-1 sequencing and the identity of the `fake` adapter are undecided
+
+**What's wrong.** AD-20 defers `AgentProvider` signatures to "the Phase 1 spike", but Phase 1 ships four adapters plus `tests/providers/`. If the four adapter stories are written in parallel, each picks signatures; the contract suite then picks a fifth. Nothing in the spine orders them.
+
+Separately, the spine asks the `fake` to satisfy three incompatible descriptions: AD-20 §1 "an adapter launches the vendor's *official* local runtime"; plan §52 "simulate success / timeout / failure / quota exhaustion / malformed result" (an in-process scripted simulator that consumes no quota); AD-19 "anything it authors carries `provider: fake`" — only possible if the fake actually drives an MCP client session against ledger-core. Two implementers would build two different fakes.
+
+**Proposed fix.** Add a sequencing rule under AD-20 (or the Structural Seed): "Phase 1 story order is fixed: (1) the spike + `agents/core/` contract types + the `fake` adapter + `tests/providers/`, which together *define* the signatures; (2) `claude`, `codex`, `google`, each blocked on (1) and each passing the suite unchanged." And define the fake: "The `fake` adapter is an **in-process** provider (no subprocess, no vendor runtime — §1 is satisfied vacuously) that scripts every AD-20 §4 failure code plus success/structured/malformed outcomes and emits the full AD-18 event stream; it never opens an MCP session, so no `provider: fake` provenance stamp is ever produced in Phase 1 — AD-19's fake clause describes what *would* happen if a future fake drove a real MCP client, not a Phase-1 behaviour."
+
+### F6 — MEDIUM — AD-19 / AD-16: env-var inheritance is verified for one of three runtimes; derived per-run config location is unspecified
+
+**What's wrong.** The inheritance claim holds for Claude Code and the brownfield `.mcp.json`: `claude` spawns each server as a stdio child (`uv run python -m …`), `uv run` passes the parent environment through, and nothing in `ledger_core/` or `.mcp.json` strips it — confirmed. It is *not* verified for Codex (derived `config.toml`) or Antigravity (derived `.agents/mcp_config.json`); either may sanitise the environment handed to MCP server subprocesses. Two adapter authors could diverge: one relies on inheritance, one injects `env` into the derived config. Note also that `tests/test_mcp_config.py` forbids any `env` key in `.mcp.json` — an adapter author could read that as forbidding `env` in derived configs too.
+
+AD-16 says derived configs go "into a per-run location — never committed as a second copy", but AD-18 says `agent_data/` is git-committed. An adapter that writes its derived config under `agent_data/sessions/{id}/` would commit a second copy by accident.
+
+In Hosted mode the attestation boundary is the operator's own shell: a human (or a hosted-mode agent with a shell tool) can export `REZOPS_AGENT_*` before launching the client. That is acceptable (the operator is trusted, AD-14) but should be stated so nobody later treats the stamp as stronger than it is.
+
+**Proposed fix.** AD-19: "An adapter sets the `REZOPS_AGENT_*` vars **both** in the launched CLI's environment **and** in every server's `env` block of the per-run derived native config — belt and braces, because provider runtimes may sanitise child environments; `.mcp.json` itself never carries an `env` block (AD-7, `test_mcp_config.py`)." AD-16: "Per-run derived configs are written to an ephemeral, git-ignored location (`agent_data/.runs/{session_id}/`, ignored via `.gitignore`) and deleted or ignored — never under a committed path." Add one sentence: "Environment attestation is as strong as control of ledger-core's process environment: in Driven mode that is the launcher (AD-20 §7 denies the agent any shell); in Hosted mode it is the operator's own shell, the same trust level as AD-14."
+
+### F7 — MEDIUM — AD-7 / AD-18 / Deferred: nothing commits or pushes either store; "git-committed" is aspirational in the brownfield
+
+**What's wrong.** `git ls-files ledger_data` returns nothing — `ledger_data/` has never been committed in this repo (`.gitignore` only excludes `dashboard.html`). AD-7's "Durability comes from a git remote, pushed after each session" has no component behind it, and an unattended driven run has no "session end" at which a human commits. The amendment adds a second store (`agent_data/`) with the same unenforced "git-committed like `ledger_data/`" claim, and the Structural Seed diagram shows `LedgerData -->|push| Remote` with nothing performing the push. The checklist item "how `agent_data/` is pushed/backed up" is therefore not decided, deferred, or flagged.
+
+**Proposed fix.** Either (a) AD-7 Rule: "`rezops agent run` ends every driven run — success or failure — with `git add agent_data/ ledger_data/ && git commit` (push remains the deferred remote-handling item); Hosted mode relies on the operator committing, as today", or (b) widen the Deferred item "Git remote push/conflict handling strategy" to "Committing and pushing `ledger_data/`/`agent_data/`: in Phase 0/1 both stores live only in the working tree and nothing commits them; accepted for a single-operator laptop; revisit at Phase 2 (durable sessions)". Either is fine; silence is not.
+
+### F8 — MEDIUM — AD-18 / AD-19: `session_id` identity vs provider-native ids
+
+**What's wrong.** `REZOPS_AGENT_SESSION_ID` is stamped on every Ledger write and keys `agent_data/sessions/{session_id}.log.md`. Claude Code's `--session-id` must be a UUID; Codex has its own thread id (`codex exec resume <SESSION_ID>`); Antigravity has `--conversation <ID>`. The spine doesn't say whether `session_id` is Rez-Ops-minted or the provider's native id. One adapter author would reuse the provider's id as `session_id` (so the format differs per provider and cannot be minted before launch — yet AD-19 needs it in the env *at* launch); another would mint one. Resume then keys off different things per adapter.
+
+**Proposed fix.** AD-18: "`session_id` is minted by `agents/core` before launch as a UUIDv4 (which also satisfies Claude Code's `--session-id`); the provider's native session/thread/conversation id, if any, is recorded as `provider_session_id` in the `session.started` payload and is what `resume_session` passes back to the vendor CLI."
+
+### F9 — LOW — Conventions row: enum casing is mixed inside one provenance block
+
+`mode` is `hosted | driven` (lowercase), `auth_mode` is `SUBSCRIPTION | API` (uppercase), failure codes are `UPPER_SNAKE`. An implementer stamping `auth_mode` will write `SUBSCRIPTION` or `subscription`. **Fix:** state once in the Conventions row: stamped enum *values* (`mode`, `auth_mode`, `event_type`) are lowercase; failure *codes* are `UPPER_SNAKE`.
+
+### F10 — LOW — Structural Seed (`pyproject.toml`): CLI installation/invocation
+
+`[tool.hatch.build.targets.wheel].packages` lists `shared, ledger_core, connectors, ops`; adding `[project.scripts] rezops = …` without adding `agents` to that list ships a console script whose import fails in an installed wheel. The spine also doesn't say how the CLI is invoked from cron. **Fix:** Seed comment: "`packages` += `agents`; the CLI is invoked as `uv run rezops …` from the repo root (project venv, no global install — matches `ops/README.md`'s absolute-path guidance for cron/launchd); `uv tool install` is not a supported path in Phase 1."
+
+### F11 — LOW — Deferred: observability (plan §55), timeout budget, `rezops doctor` scope
+
+Plan §55 ("Is Rez Ops itself healthy?", last agent run, failed jobs) is not in Deferred; the per-run wall-clock budget behind `AGENT_TIMEOUT` (today 600 s in the ops script) has no stated owner; plan §54's `doctor` covers Sensors/Ledger/Policy while AD-17 frames it as the provider probe only. **Fix:** one Deferred bullet: "Observability beyond `agent_data/` projections and `rezops doctor` (plan §55) — Phase 2+; `doctor` in Phase 1 reports providers only; the driven-run timeout is an `agents/core` constant set by the claude adapter story, not per-provider config, until Phase 6 routing."
+
+### F12 — LOW — AD-18: "memlog-style" is the only format spec for agent events
+
+`log.py`'s format is an exact regex (`- (type) ts source=… artifact=… fields=json`); agent events have different keys. Single writer (`agents/core`) so divergence risk is low, but `agents/sessions/` (the projection) is a second module reading it. **Fix:** "one formatter/parser pair in `agents/core/events.py`, mirroring `log.py`'s `_format_event`/`read_events`; `agents/sessions/` imports it, never re-parses."
+
+### F13 — INFO — Stack rows: local corroboration
+
+`claude --version` → 2.1.269 matches the Stack row. Local `codex` is the exact "npm wrapper installed, binary missing (ENOENT)" case AD-17 cites. `agy` is not installed locally, so the Antigravity row rests on vendor docs only (the row says so). `uv.lock` pins `mcp` 1.29.0; the row's `>=1.29,<2` holds. Web-sourced claims (Gemini CLI 2026-06-18, SDK 2.2.0 / 2026-09-07, issue #38987) are dated in the spine; not independently re-verified here — version-currency reviewer's lane.
+
+## Checklist walk
+
+- **Fixes the real divergence points for the level below, misses none** — Partially. Constructed stories: (a) `agents/core` + fake + contract suite, (b–d) claude/codex/google adapters, (e) `rezops` CLI, (f) `agent_data/` store, (g) ledger-core provenance stamp, (h) scheduled-briefing migration. Divergence the spine leaves open: (a)↔(b–d) on signatures and sequencing and what the fake is (F5); (b)↔(c)↔(d) on env injection vs inheritance and derived-config location (F6) and on `session_id` identity (F8); (e)↔(h) on who logs a failed run and whether the ops script survives (F1); (g) on operator var name (F2), read-compat (F3), and which tools are stamped (F4); (f) on who commits (F7). Everything else — single MCP surface, probe-not-declare, separate store, shared failure enum, tool scope — is fixed well.
+- **Every AD's Rule is enforceable and prevents its stated divergence** — AD-16, AD-17, AD-18, AD-20: yes, each Prevents clause maps to a Rule clause and the rules are checkable in code review/tests. AD-19: the Rule does not achieve its first Prevents for `ledger_ingest_raw_fact`/`ledger_create_draft` (F4) and its Hosted-mode branch reads an undefined source (F2).
+- **Nothing under Deferred could let two Phase-1 units diverge** — Mostly. "Exact `AgentProvider` signatures" deferred while four adapters are built in the same phase is the one deferral that bites unless sequenced (F5). "Git remote push/conflict handling" is silent on *commit*, not just push (F7). Everything else deferred (missions, routing, skills, API mode, persistence, hosted) is genuinely post-Phase-1.
+- **Named tech is verified-current (dates/versions stated)** — Yes. Every Stack row carries a date and version; Claude Code 2.1.269 corroborated locally; Codex ENOENT corroborated locally; `mcp` 1.29.0 locked. Antigravity rests on vendor docs only, stated as such.
+- **Ratifies rather than contradicts the brownfield** — Three contradictions: AD-19's stamp vs the strict-key parsers in `evidence.py`/`action_proposals.py` (F3); amended AD-7 vs the existing `ops/run_scheduled_briefing.py`, which violates AD-20 §3 as written (F1); "git-committed" vs a `ledger_data/` that has never been tracked (F7). The env-inheritance claim does hold for the Claude Code + `.mcp.json` (`uv run python -m …`) path as built; it is unverified for the two derived-config paths (F6).
+- **No new AD weakens or contradicts an existing one** — AD-1: strengthened, not weakened. AD-3 sole writer: preserved by AD-18 (separate directory), but AD-7's `_ops.log.md` clause now conflicts with AD-18's "`agents/` never writes `ledger_data/`" (F1). AD-6: unaffected (and AD-19 should extend to `Draft`, F4). AD-7 no-persistent-server: preserved; invoked-per-run stated. AD-11/12 who-computes-what: preserved; provenance is stamped by ledger-core, never caller-supplied — consistent. AD-14 operator identity: AD-19 depends on it before it exists (F2).
+- **Every dimension the altitude owns is decided, deferred, or open — esp. the new component's operational envelope** — Deployment/invocation: decided (`rezops agent run` via OS scheduler, `uv run`), with the CLI install path needing one line (F10). Backup/push of `agent_data/`: not decided or deferred (F7). Failed driven run: decided twice, contradictorily (F1). Observability: `agent_data/` events + `doctor` exist; plan §55 not placed (F11). Timeout budget: unplaced (F11). Derived-config location: unplaced (F6).
