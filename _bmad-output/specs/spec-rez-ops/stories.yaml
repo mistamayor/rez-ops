@@ -335,3 +335,108 @@
     real. User-confirmed checkpoints reflect this project's history with
     dashboards (built and rejected twice before this cycle): review both
     the plan and the finished result.
+- id: "21"
+  title: "Agent runtime core, fake adapter, and the contract suite"
+  description: >-
+    The Phase 1 spike: inspect the three real runtimes, then fix the
+    AgentProvider interface and build agents/core, the agent_data/ event
+    store, the in-process fake adapter, tests/providers/, and the rezops
+    CLI (doctor, agent run --provider fake) (SPEC CAP-14/15/16 partial,
+    CAP-18 fake). Nothing in ledger_core/, connectors/, or shared/ changes.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Implements AD-16/17/18/20 for the fake provider, and sets (never reads)
+    the AD-19 environment. Order inside the story: inspect Claude Code,
+    Codex CLI, and Antigravity CLI first (docs/provider-adapter-contract.md
+    section 12 is the verified starting matrix; re-probe), THEN fix the
+    AgentProvider method signatures -- the plan's own rule is no premature
+    fake abstractions. agents/core mints a UUID session_id before any
+    launch, sets REZOPS_AGENT_SESSION_ID/PROVIDER/MODE=driven/AUTH_MODE,
+    emits every AD-18 event type with payload shapes defined once and
+    versioned in agents/core, and appends only to agent_data/sessions/
+    using ledger_core/log.py's line grammar as the reference (read it, do
+    not import ledger_core). Agent failure codes live in agents/core for
+    Phase 1 (user decision; Phase 3 relocates them into shared/failures) --
+    a closed set, add-with-a-test. The fake runs in-process, launches no
+    binary, simulates a full session end to end, and can inject every
+    failure code; if the fake needs a special case in tests/providers/, the
+    suite is wrong. rezops doctor probes without launching a session by
+    default; --live is a full driven session under every AD. Exit bar:
+    rezops agent run --provider fake works; rezops doctor reports the fake
+    by probe and this machine's Codex install as not installed. 820
+    existing tests still pass untouched. Definition of done is
+    docs/provider-adapter-contract.md section 11.
+- id: "22"
+  title: "Claude Code adapter"
+  description: >-
+    First real provider: agents/providers/claude launches claude -p headless
+    against .mcp.json in strict MCP-config mode, enforces tool scope, and
+    forwards provenance by name (SPEC CAP-14/15/18 claude). Also turns
+    ops/run_scheduled_briefing.py into a thin shim over rezops agent run
+    --provider claude, closing CAP-8's grandfathered exception.
+  spec_checkpoint: true
+  done_checkpoint: true
+  invoke_dev_with: >-
+    Implements AD-16/17/19/20 for Claude Code (2.1.269 verified 2026-09-12;
+    re-probe -- headless MCP loading regressed once in 2.1.77). Launch in
+    the project root with --mcp-config .mcp.json --strict-mcp-config
+    --output-format stream-json and --session-id/--resume for sessions;
+    never --bare, never --dangerously-skip-permissions. Deny built-in
+    shell, file-write, and web tools through Claude's own permission
+    mechanism; before the first task compare the reported loaded-server
+    set to .mcp.json and fail with TOOL_SCOPE_VIOLATION on any difference;
+    fail with MCP_ATTACH_FAILED if not every server attaches. Confirm the
+    ledger-core child process inherits the four REZOPS_AGENT_* variables
+    by name; if Claude whitelists the environment passed to MCP children,
+    solve it by name, never by writing values into a generated file --
+    PROVENANCE_UNAVAILABLE otherwise. Probe auth_mode and refuse to launch
+    with AUTH_MODE_MISMATCH if an ambient ANTHROPIC_API_KEY would flip a
+    subscription session to API without opt-in. The vendor's name, flags,
+    and output schema appear only inside this package. Must pass Story
+    21's tests/providers/ with no adapter-specific skips, plus the four
+    negative launches in docs/provider-adapter-contract.md section 11.
+- id: "23"
+  title: "OpenAI Codex CLI adapter"
+  description: >-
+    agents/providers/codex derives a per-run config.toml from .mcp.json,
+    launches codex exec headless, and proves the probe distinguishes a
+    wrapper-present-binary-missing install from a working one (SPEC CAP-18
+    codex).
+  spec_checkpoint: true
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implements AD-16/17/19/20 for Codex CLI (verified from vendor docs
+    2026-09-12; pin the npm @openai/codex version when built). Derive
+    [mcp_servers.*] TOML into .rezops/run/{session_id}/ from .mcp.json --
+    never hand-maintain a second list, never commit it; confirm the
+    strict/isolated MCP-config equivalent so ~/.codex/config.toml (which
+    on this machine already registers an extra server) cannot merge in, or
+    fail the launch. Never set CODEX_HOME elsewhere (it relocates auth) and
+    never read ~/.codex/auth.json. codex exec --json for events,
+    --output-schema for structured results, codex exec resume for
+    sessions; read-only sandbox stays the default. Same contract suite,
+    same negative launches as Story 22.
+- id: "24"
+  title: "Google Antigravity CLI adapter"
+  description: >-
+    agents/providers/google derives .agents/mcp_config.json from .mcp.json
+    and launches agy -p headless, judging health and tool scope from the
+    JSON envelope because a denied tool call exits 0 (SPEC CAP-18 google).
+    Antigravity, not the retired Gemini CLI subscription route.
+  spec_checkpoint: true
+  done_checkpoint: false
+  invoke_dev_with: >-
+    Implements AD-16/17/19/20 for Antigravity CLI agy 1.2.0 (verified
+    2026-09-12, releases roughly weekly -- pin when built). Gemini CLI
+    stopped serving Google AI Pro/Ultra on 2026-06-18; do not target it.
+    Derive .agents/mcp_config.json per run (stdio shape matches .mcp.json;
+    all 7 Rez Ops servers are stdio); confirm the isolation equivalent so
+    ~/.gemini/config/mcp_config.json cannot merge in, or fail the launch;
+    never relocate ~/.gemini. A denied tool call exits 0 with status
+    SUCCESS and a stderr notice only -- judge healthy/authenticated/scope
+    from the structured result and denial notices, never the exit code;
+    unauthenticated headless exits non-zero. Use permissions.allow for
+    the MCP tools, never --dangerously-skip-permissions. --continue /
+    --conversation <id> for sessions. Same contract suite, same negative
+    launches as Story 22.
